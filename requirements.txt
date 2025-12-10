@@ -1,0 +1,3 @@
+typer
+llama-cpp-python
+rich
