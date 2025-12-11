@@ -46,7 +46,7 @@ CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --force-reinstall --no
 
 ### 3. Download a Model
 
-Download a GGUF model file. The default configuration uses Qwen2.5-Coder-7B-Instruct:
+Download a GGUF model file and put it in the root of the project. The example in this project uses the Qwen2.5-Coder 7B model
 
 ```bash
 # Using huggingface-cli (recommended)
@@ -63,6 +63,8 @@ Or download manually from [Hugging Face](https://huggingface.co/Qwen/Qwen2.5-Cod
 - [Qwen2.5-Coder](https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF) (recommended for coding)
 - [DeepSeek-Coder](https://huggingface.co/TheBloke/deepseek-coder-6.7B-instruct-GGUF)
 - [CodeLlama](https://huggingface.co/TheBloke/CodeLlama-7B-Instruct-GGUF)
+
+Whichever gguf model you choose to use, make sure to not commit it to the repo. It should be gitignored
 
 ### 4. Update Model Path
 
@@ -267,6 +269,8 @@ Contributions are welcome! Areas for improvement:
 - Better error messages
 - Additional commands (code search, refactoring, etc.)
 - Unit tests
+
+As you can tell from the CLAUDE.md file in the gitignore, I used AI to help me make this project. Feel free to use AI tools to help you contribute to the repo. Whatever you use, make sure to test properly on your local before you push changes.
 
 ## License
 
