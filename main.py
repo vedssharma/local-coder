@@ -5,6 +5,7 @@ from llama_cpp import Llama
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.live import Live
+from rich.spinner import Spinner
 
 app = typer.Typer()
 
@@ -20,11 +21,27 @@ def ask(
     max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate")
 ):
     """Ask a coding question with optional file references using @file syntax"""
+    console = Console()
     original_prompt, file_contents = parse_file_references(prompt)
     user_prompt = build_prompt_with_context(original_prompt, file_contents)
+
+    response_text = ""
     stream = llm(user_prompt, max_tokens=max_tokens, stream=True)
-    for output in stream:
-        print(output["choices"][0]["text"], end="", flush=True)
+
+    # Show thinking spinner until first token arrives, then switch to markdown rendering
+    first_token = True
+    with Live(Spinner("dots", text="Thinking..."), console=console, refresh_per_second=10) as live:
+        for output in stream:
+            token = output["choices"][0]["text"]
+            response_text += token
+
+            # Switch from spinner to markdown after first token
+            if first_token:
+                first_token = False
+                live.update(Markdown(response_text))
+            else:
+                live.update(Markdown(response_text))
+
     print()
 
 @app.command()
@@ -53,10 +70,19 @@ def chat(
             response_text = ""
             stream = llm(user_prompt, max_tokens=max_tokens, stream=True)
 
-            with Live(Markdown(""), console=console, refresh_per_second=10) as live:
+            # Show thinking spinner until first token arrives, then switch to markdown rendering
+            first_token = True
+            with Live(Spinner("dots", text="Thinking..."), console=console, refresh_per_second=10) as live:
                 for output in stream:
-                    response_text += output["choices"][0]["text"]
-                    live.update(Markdown(response_text))
+                    token = output["choices"][0]["text"]
+                    response_text += token
+
+                    # Switch from spinner to markdown after first token
+                    if first_token:
+                        first_token = False
+                        live.update(Markdown(response_text))
+                    else:
+                        live.update(Markdown(response_text))
 
             print()
 
