@@ -19,14 +19,18 @@ A Claude Code-inspired AI coding assistant that runs entirely on your local mach
 
 ## Installation
 
-### 1. Clone the Repository
+You can run Local Coder either natively or using Docker.
+
+### Option A: Native Installation
+
+#### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/yourusername/local-coder.git
 cd local-coder
 ```
 
-### 2. Install Dependencies
+#### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -44,7 +48,7 @@ For Metal (macOS with Apple Silicon):
 CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
 ```
 
-### 3. Download a Model
+#### 3. Download a Model
 
 Download a GGUF model file and put it in the root of the project. The example in this project uses the Qwen2.5-Coder 7B model
 
@@ -66,7 +70,7 @@ Or download manually from [Hugging Face](https://huggingface.co/Qwen/Qwen2.5-Cod
 
 Whichever gguf model you choose to use, make sure to not commit it to the repo. It should be gitignored
 
-### 4. Update Model Path
+#### 4. Update Model Path
 
 Edit `main.py` and update the `model_path` to point to your downloaded model:
 
@@ -77,6 +81,43 @@ llm = Llama(
     n_gpu_layers=-1
 )
 ```
+
+### Option B: Docker Installation
+
+#### 1. Clone the Repository
+
+```bash
+git clone https://github.com/yourusername/local-coder.git
+cd local-coder
+```
+
+#### 2. Download a Model
+
+Download your GGUF model file (see step 3 in Native Installation above).
+
+#### 3. Build the Docker Image
+
+```bash
+docker build -t local-coder .
+```
+
+#### 4. Run with Docker
+
+**Interactive chat:**
+```bash
+docker run -it --rm \
+  -v $(pwd)/your-model.gguf:/app/models/model.gguf:ro \
+  local-coder
+```
+
+**Ask a question:**
+```bash
+docker run -it --rm \
+  -v $(pwd)/your-model.gguf:/app/models/model.gguf:ro \
+  local-coder ask "your question"
+```
+
+**For GPU support and more Docker options, see [DOCKER.md](DOCKER.md)**
 
 ## Usage
 

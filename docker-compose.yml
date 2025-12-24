@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  local-coder:
+    build: .
+    image: local-coder:latest
+    container_name: local-coder
+    stdin_open: true  # Enable interactive mode
+    tty: true         # Allocate a pseudo-TTY
+    volumes:
+      # Mount your model file (update the path to your model)
+      - ./Qwen_Qwen2.5-Coder-7B-Instruct-GGUF_qwen2.5-coder-7b-instruct-q4_k_m.gguf:/app/models/model.gguf:ro
+      # Mount your code directory if you want to reference files with @
+      - .:/workspace:ro
+    working_dir: /workspace
+    environment:
+      - PYTHONUNBUFFERED=1
+    # For GPU support (NVIDIA), uncomment the following:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
