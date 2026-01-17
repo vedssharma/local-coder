@@ -1,19 +1,30 @@
 from prompt_builder import build_prompt_with_context, build_edit_prompt
 from helpers import parse_edit_blocks, apply_edits, parse_file_references
+import config
 import typer
 from llama_cpp import Llama
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.live import Live
 from rich.spinner import Spinner
+import os
 
 app = typer.Typer()
 
-llm = Llama(
-    model_path="./Qwen_Qwen2.5-Coder-7B-Instruct-GGUF_qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-    n_ctx=8192,
-    n_gpu_layers=-1
-)
+# Global variable to hold the model instance (lazy loaded)
+llm = None
+
+def get_llm():
+    """Lazy load the LLM model."""
+    global llm
+    if llm is None:
+        model_config = config.get_model_config()
+        llm = Llama(
+            model_path=model_config["model_path"],
+            n_ctx=model_config["n_ctx"],
+            n_gpu_layers=model_config["n_gpu_layers"]
+        )
+    return llm
 
 @app.command()
 def ask(
@@ -26,7 +37,7 @@ def ask(
     user_prompt = build_prompt_with_context(original_prompt, file_contents)
 
     response_text = ""
-    stream = llm(user_prompt, max_tokens=max_tokens, stream=True)
+    stream = get_llm()(user_prompt, max_tokens=max_tokens, stream=True)
 
     # Show thinking spinner until first token arrives, then switch to markdown rendering
     first_token = True
@@ -68,7 +79,7 @@ def chat(
 
             typer.echo("\nAssistant:")
             response_text = ""
-            stream = llm(user_prompt, max_tokens=max_tokens, stream=True)
+            stream = get_llm()(user_prompt, max_tokens=max_tokens, stream=True)
 
             # Show thinking spinner until first token arrives, then switch to markdown rendering
             first_token = True
@@ -109,7 +120,7 @@ def edit(
     edit_prompt = build_edit_prompt(original_prompt, file_contents)
 
     typer.echo("Generating changes...\n")
-    response = llm(edit_prompt, max_tokens=max_tokens, stream=False)
+    response = get_llm()(edit_prompt, max_tokens=max_tokens, stream=False)
     llm_output = response["choices"][0]["text"]
 
     typer.echo("=" * 60)
@@ -137,6 +148,52 @@ def edit(
             return
 
     apply_edits(edits, dry_run=False)
+
+@app.command()
+def models(
+    set_model: str = typer.Option(None, "--set", "-s", help="Path to GGUF model file to use")
+):
+    """Show current model or set a new model."""
+    console = Console()
+
+    if set_model:
+        # User wants to change the model
+        if not os.path.exists(set_model):
+            typer.echo(f"Error: Model file not found: {set_model}", err=True)
+            raise typer.Exit(1)
+
+        if not set_model.lower().endswith('.gguf'):
+            typer.echo(f"Error: Model file must be a .gguf file", err=True)
+            raise typer.Exit(1)
+
+        # Get absolute path
+        abs_path = os.path.abspath(set_model)
+
+        # Update configuration
+        if config.set_model_path(abs_path):
+            typer.echo(f"✓ Model updated successfully!")
+            typer.echo(f"  New model: {abs_path}")
+            typer.echo(f"\nNote: Restart the application for the change to take effect.")
+        else:
+            typer.echo(f"Error: Failed to update model configuration", err=True)
+            raise typer.Exit(1)
+    else:
+        # Show current model
+        current_config = config.get_model_config()
+        model_path = current_config["model_path"]
+
+        typer.echo("Current Model Configuration:")
+        typer.echo(f"  Model path: {model_path}")
+        typer.echo(f"  Context size: {current_config['n_ctx']}")
+        typer.echo(f"  GPU layers: {current_config['n_gpu_layers']}")
+
+        # Check if model file exists
+        if os.path.exists(model_path):
+            file_size = os.path.getsize(model_path) / (1024 * 1024 * 1024)  # Convert to GB
+            typer.echo(f"  File size: {file_size:.2f} GB")
+            typer.echo(f"  Status: ✓ Available")
+        else:
+            typer.echo(f"  Status: ✗ Not found")
 
 
 if __name__ == "__main__":
