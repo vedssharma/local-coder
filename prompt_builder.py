@@ -1,13 +1,39 @@
+import os
+
+
+def _load_context_md():
+    """Load CONTEXT.md from the current directory if it exists."""
+    path = os.path.join(os.getcwd(), "CONTEXT.md")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+        # Truncate if very large to keep system message reasonable
+        max_len = 4000
+        if len(content) > max_len:
+            content = content[:max_len] + "\n\n[... truncated ...]"
+        return content
+    except Exception:
+        return None
+
+
 def build_system_message():
-    return {
-        "role": "system",
-        "content": (
-            "You are an expert coding assistant with access to filesystem tools. "
-            "You can read files, list directories, search for patterns, and write files. "
-            "Use tools to explore the codebase when you need more context. "
-            "When you have enough information, provide your answer directly."
+    base = (
+        "You are an expert coding assistant with access to filesystem tools. "
+        "You can read files, list directories, search for patterns, and write files. "
+        "Use tools to explore the codebase when you need more context. "
+        "When you have enough information, provide your answer directly."
+    )
+
+    context_md = _load_context_md()
+    if context_md:
+        base += (
+            "\n\nHere is project context from CONTEXT.md:\n"
+            f"<context>\n{context_md}\n</context>"
         )
-    }
+
+    return {"role": "system", "content": base}
 
 
 def build_edit_system_message():

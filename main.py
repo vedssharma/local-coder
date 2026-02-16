@@ -98,6 +98,110 @@ def handle_model_command():
         typer.echo(f"Error loading model: {e}\n")
 
 
+def _gather_project_context():
+    """Gather project information by reading key files from disk."""
+    from pathlib import Path
+
+    context_parts = []
+
+    # List top-level directory
+    cwd = Path(".")
+    entries = sorted(cwd.iterdir())
+    dir_listing = []
+    skip = {".git", "__pycache__", "node_modules", "venv", ".venv", "llm"}
+    for entry in entries:
+        if entry.name in skip:
+            continue
+        suffix = "/" if entry.is_dir() else ""
+        dir_listing.append(f"  {entry.name}{suffix}")
+    context_parts.append("## Directory listing\n" + "\n".join(dir_listing))
+
+    # Read key files (if they exist)
+    key_files = [
+        "README.md", "requirements.txt", "package.json", "setup.py",
+        "pyproject.toml", "Dockerfile", "docker-compose.yml",
+        "config.py", "main.py", "CLAUDE.md",
+    ]
+    max_file_chars = 3000
+    for fname in key_files:
+        p = Path(fname)
+        if p.exists() and p.is_file():
+            try:
+                content = p.read_text(encoding="utf-8", errors="replace")
+                if len(content) > max_file_chars:
+                    content = content[:max_file_chars] + "\n... [truncated]"
+                context_parts.append(f"## Contents of {fname}\n```\n{content}\n```")
+            except Exception:
+                pass
+
+    return "\n\n".join(context_parts)
+
+
+def handle_md_command(console, max_tokens):
+    """Handle the /md slash command: explore the project and generate CONTEXT.md."""
+    typer.echo("\nGenerating CONTEXT.md by exploring the project...\n")
+
+    md_max_tokens = max(max_tokens, 2048)
+
+    # Step 1: Gather real project data from disk (no LLM needed)
+    typer.echo("Reading project files...\n")
+    project_data = _gather_project_context()
+
+    # Step 2: Ask the LLM to synthesize into a CONTEXT.md
+    generate_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a technical writer. Generate a markdown document and nothing else. "
+                "Do not use any tools. Just output the markdown content directly."
+            )
+        },
+        {
+            "role": "user",
+            "content": (
+                "Based on the following real project files, write the contents of a CONTEXT.md file. "
+                "Include these sections:\n"
+                "- Project name and one-line description\n"
+                "- Tech stack and dependencies\n"
+                "- Directory structure overview\n"
+                "- Key files and what they do\n"
+                "- How to run the project\n"
+                "- Architecture notes\n\n"
+                "Output ONLY the markdown content, no explanation. "
+                "Base everything strictly on the file contents provided below.\n\n"
+                f"{project_data}"
+            )
+        }
+    ]
+
+    typer.echo("Generating CONTEXT.md content...\n")
+    md_content = run_agent_loop(
+        llm=get_llm(),
+        messages=generate_messages,
+        console=console,
+        max_tokens=md_max_tokens,
+        require_write_confirmation=None
+    )
+
+    if not md_content or not md_content.strip():
+        typer.echo("Failed to generate CONTEXT.md content.\n")
+        return
+
+    # Step 3: Show and write with user confirmation
+    console.print(Markdown(md_content))
+    console.print()
+
+    if _confirm_write("CONTEXT.md", md_content):
+        try:
+            with open("CONTEXT.md", "w", encoding="utf-8") as f:
+                f.write(md_content)
+            typer.echo("CONTEXT.md has been created. It will be auto-injected into future prompts.\n")
+        except Exception as e:
+            typer.echo(f"Error writing CONTEXT.md: {e}\n")
+    else:
+        typer.echo("Write cancelled.\n")
+
+
 @app.command()
 def ask(
     prompt: str = typer.Argument(..., help="Coding question"),
@@ -141,6 +245,10 @@ def chat(
 
             if prompt.strip().lower() == "/model":
                 handle_model_command()
+                continue
+
+            if prompt.strip().lower() == "/md":
+                handle_md_command(console, max_tokens)
                 continue
 
             if not prompt.strip():
