@@ -27,6 +27,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py .
 COPY helpers.py .
 COPY prompt_builder.py .
+COPY tools.py .
+COPY agent.py .
 COPY entrypoint.sh .
 
 # Make entrypoint script executable
