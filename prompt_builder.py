@@ -20,10 +20,12 @@ def _load_context_md():
 
 def build_system_message():
     base = (
-        "You are an expert coding assistant with access to filesystem tools. "
-        "You can read files, list directories, search for patterns, and write files. "
-        "Use tools to explore the codebase when you need more context. "
-        "When you have enough information, provide your answer directly."
+        "You are an expert coding assistant with access to filesystem tools.\n"
+        "IMPORTANT: You MUST call tools to answer any question about files or directories. "
+        "Never answer from memory or guess file contents. "
+        "For listing files, call list_directory. For reading files, call read_file. "
+        "For searching code, call search_files. "
+        "Always call a tool first, then summarize the result in your answer."
     )
 
     context_md = _load_context_md()
@@ -40,10 +42,9 @@ def build_edit_system_message():
     return {
         "role": "system",
         "content": (
-            "You are an expert coding assistant that helps edit code files. "
-            "You have access to filesystem tools to read and explore files. "
-            "When asked to make changes, use the write_file tool to apply them. "
-            "Read files first to understand the full context before making edits."
+            "You are an expert coding assistant that edits code files. "
+            "IMPORTANT: Always call read_file first to read the target file, then call write_file to apply your changes. "
+            "Never guess file contents — read them first. Use tools, then summarize what you did."
         )
     }
 

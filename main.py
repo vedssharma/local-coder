@@ -1,6 +1,7 @@
 from prompt_builder import build_messages, build_edit_system_message, build_user_message
 from helpers import parse_file_references
 from agent import run_agent_loop
+from mcp_client import MCPClient
 import config
 import os
 import glob
@@ -13,6 +14,23 @@ app = typer.Typer()
 
 # Global variable to hold the model instance (lazy loaded)
 llm = None
+
+# Global MCP client instance (lazy loaded)
+_mcp_client = None
+
+
+def get_mcp_client():
+    """Lazy-initialize and return the MCP filesystem client."""
+    global _mcp_client
+    if _mcp_client is None:
+        _mcp_client = MCPClient()
+        typer.echo("Connecting to MCP filesystem server...")
+        _mcp_client.connect()
+        if _mcp_client.is_connected:
+            typer.echo(f"MCP connected ({len(_mcp_client.tool_names)} tools available)")
+        else:
+            typer.echo("MCP unavailable — no tools will be available")
+    return _mcp_client
 
 def get_llm():
     """Lazy load the LLM model."""
@@ -27,24 +45,6 @@ def get_llm():
         )
     return llm
 
-
-def _confirm_write(path, content):
-    """Ask user before writing a file."""
-    typer.echo(f"\nThe assistant wants to write to: {path}")
-    typer.echo(f"  ({len(content)} characters)")
-    return typer.confirm("Allow this write?")
-
-
-def _confirm_write_or_dry_run(path, content, dry_run):
-    """For edit command: show preview or ask confirmation."""
-    if dry_run:
-        typer.echo(f"\n{'='*60}")
-        typer.echo(f"Would write: {path}")
-        typer.echo(f"{'='*60}")
-        typer.echo(content)
-        return False
-    typer.echo(f"\nThe assistant wants to write to: {path}")
-    return typer.confirm("Apply this change?")
 
 
 def handle_model_command():
@@ -179,8 +179,7 @@ def handle_md_command(console, max_tokens):
         llm=get_llm(),
         messages=generate_messages,
         console=console,
-        max_tokens=md_max_tokens,
-        require_write_confirmation=None
+        max_tokens=md_max_tokens
     )
 
     if not md_content or not md_content.strip():
@@ -191,7 +190,7 @@ def handle_md_command(console, max_tokens):
     console.print(Markdown(md_content))
     console.print()
 
-    if _confirm_write("CONTEXT.md", md_content):
+    if typer.confirm("Write CONTEXT.md?"):
         try:
             with open("CONTEXT.md", "w", encoding="utf-8") as f:
                 f.write(md_content)
@@ -205,19 +204,21 @@ def handle_md_command(console, max_tokens):
 @app.command()
 def ask(
     prompt: str = typer.Argument(..., help="Coding question"),
-    max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate")
+    max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate"),
+    no_mcp: bool = typer.Option(False, "--no-mcp", help="Disable MCP filesystem server")
 ):
     """Ask a coding question with optional file references using @file syntax"""
     console = Console()
     original_prompt, file_contents = parse_file_references(prompt)
     messages = build_messages(original_prompt, file_contents)
 
+    mcp = None if no_mcp else get_mcp_client()
     final_answer = run_agent_loop(
         llm=get_llm(),
         messages=messages,
         console=console,
         max_tokens=max_tokens,
-        require_write_confirmation=_confirm_write
+        mcp_client=mcp
     )
 
     console.print()
@@ -227,67 +228,71 @@ def ask(
 
 @app.command()
 def chat(
-    max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate")
+    max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate"),
+    no_mcp: bool = typer.Option(False, "--no-mcp", help="Disable MCP filesystem server")
 ):
     """Start an interactive chat session. Type /exit to quit."""
     console = Console()
     typer.echo("Starting interactive chat session. Type /exit to quit.\n")
 
+    mcp = None if no_mcp else get_mcp_client()
     history = []
 
-    while True:
-        try:
-            prompt = typer.prompt("\nYou")
+    try:
+        while True:
+            try:
+                prompt = typer.prompt("\nYou")
 
-            if prompt.strip().lower() == "/exit":
-                typer.echo("Goodbye!")
+                if prompt.strip().lower() == "/exit":
+                    typer.echo("Goodbye!")
+                    break
+
+                if prompt.strip().lower() == "/model":
+                    handle_model_command()
+                    continue
+
+                if prompt.strip().lower() == "/md":
+                    handle_md_command(console, max_tokens)
+                    continue
+
+                if not prompt.strip():
+                    continue
+
+                original_prompt, file_contents = parse_file_references(prompt)
+                messages = build_messages(original_prompt, file_contents, history=history)
+
+                typer.echo("\nAssistant:")
+                final_answer = run_agent_loop(
+                    llm=get_llm(),
+                    messages=messages,
+                    console=console,
+                    max_tokens=max_tokens,
+                    mcp_client=mcp
+                )
+
+                console.print(Markdown(final_answer))
+                console.print()
+
+                # Store only user/assistant messages for history (not tool call intermediates)
+                history.append({"role": "user", "content": original_prompt})
+                history.append({"role": "assistant", "content": final_answer})
+
+                # Trim history to last 10 turns to manage context window
+                if len(history) > 20:
+                    history = history[-20:]
+
+            except (KeyboardInterrupt, EOFError):
+                typer.echo("\n\nGoodbye!")
                 break
-
-            if prompt.strip().lower() == "/model":
-                handle_model_command()
-                continue
-
-            if prompt.strip().lower() == "/md":
-                handle_md_command(console, max_tokens)
-                continue
-
-            if not prompt.strip():
-                continue
-
-            original_prompt, file_contents = parse_file_references(prompt)
-            messages = build_messages(original_prompt, file_contents, history=history)
-
-            typer.echo("\nAssistant:")
-            final_answer = run_agent_loop(
-                llm=get_llm(),
-                messages=messages,
-                console=console,
-                max_tokens=max_tokens,
-                require_write_confirmation=_confirm_write
-            )
-
-            console.print(Markdown(final_answer))
-            console.print()
-
-            # Store only user/assistant messages for history (not tool call intermediates)
-            history.append({"role": "user", "content": original_prompt})
-            history.append({"role": "assistant", "content": final_answer})
-
-            # Trim history to last 10 turns to manage context window
-            if len(history) > 20:
-                history = history[-20:]
-
-        except (KeyboardInterrupt, EOFError):
-            typer.echo("\n\nGoodbye!")
-            break
+    finally:
+        if mcp and mcp.is_connected:
+            mcp.close()
 
 
 @app.command()
 def edit(
     prompt: str = typer.Argument(..., help="Edit request (use @file syntax to reference files)"),
     max_tokens: int = typer.Option(2048, "--max-tokens", "-n", help="Max number of tokens"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show changes without applying them"),
-    apply_changes: bool = typer.Option(False, "--apply", "-y", help="Apply changes without confirmation")
 ):
     """Request code changes. Reference files with @file syntax."""
     console = Console()
@@ -296,18 +301,14 @@ def edit(
     messages = [build_edit_system_message()]
     messages.append(build_user_message(original_prompt, file_contents))
 
-    if apply_changes:
-        confirm_fn = None
-    else:
-        confirm_fn = lambda p, c: _confirm_write_or_dry_run(p, c, dry_run)
-
+    mcp = get_mcp_client()
     typer.echo("Generating changes...\n")
     final_answer = run_agent_loop(
         llm=get_llm(),
         messages=messages,
         console=console,
         max_tokens=max_tokens,
-        require_write_confirmation=confirm_fn
+        mcp_client=mcp
     )
 
     if final_answer:

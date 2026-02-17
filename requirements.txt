@@ -1,3 +1,4 @@
 typer
 llama-cpp-python
 rich
+mcp
