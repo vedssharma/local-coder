@@ -44,4 +44,4 @@ llm/
 
 # Project specific
 /CLAUDE.md
-*.md
+/CONTEXT.md
