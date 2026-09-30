@@ -1,137 +1,167 @@
+"""Bounded agent execution with explicit, inspectable outcomes."""
+from dataclasses import dataclass
 import json
 import re
-import typer
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.live import Live
-from rich.spinner import Spinner
+import time
+from typing import Literal
+
+from jsonschema import validate, ValidationError
 
 MAX_AGENT_ITERATIONS = 10
 
 
+@dataclass
+class RunBudget:
+    max_steps: int = MAX_AGENT_ITERATIONS
+    max_seconds: float = 300
+    max_generated_tokens: int = 8192
+
+    def __post_init__(self):
+        if min(self.max_steps, self.max_seconds, self.max_generated_tokens) <= 0:
+            raise ValueError('Run budgets must be positive')
+
+
+@dataclass
+class RunResult:
+    status: Literal['completed', 'blocked', 'cancelled', 'budget_exhausted']
+    text: str
+    steps: int = 0
+    generated_tokens: int = 0
+    reason: str = ''
+
+
 def _build_tool_schemas(mcp_client=None):
-    """Return MCP tool schemas, or an empty list if MCP is not connected."""
     if not mcp_client or not mcp_client.is_connected:
         return []
     return mcp_client.get_openai_tool_schemas()
 
 
-def run_agent_loop(llm, messages, console, max_tokens=512, mcp_client=None):
-    """
-    Run the agentic tool-calling loop.
+def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
+              cancel_event=None, emit=None, inline_tool_calls=False):
+    """Run a turn. Completion means the model finished, not that its claims were verified.
 
-    Calls the LLM with tool schemas. If the LLM returns tool calls,
-    executes them via MCP, appends results, and loops. When the LLM
-    returns a text response (no tool calls), returns that as the final answer.
+    Time and cancellation are checked between model/tool operations. Blocking model
+    calls require backend timeouts; this engine never promises to interrupt them.
     """
+    budget = budget or RunBudget()
+    emit = emit or (lambda event: None)
     schemas = _build_tool_schemas(mcp_client)
+    registered = {s['function']['name']: s['function'].get('parameters', {'type': 'object'})
+                  for s in schemas}
+    started, generated, failures, steps = time.monotonic(), 0, {}, 0
 
-    tool_summary = f"{len(schemas)} MCP tools"
-    if schemas:
-        tool_summary += f" ({', '.join(s['function']['name'] for s in schemas)})"
-    console.print(f"[dim]{tool_summary}[/dim]")
+    def finish(status, text, reason=''):
+        result = RunResult(status, text, steps, generated, reason)
+        emit({'type': 'run_finished', 'status': status, 'reason': reason})
+        return result
 
-    for iteration in range(MAX_AGENT_ITERATIONS):
-        call_kwargs = {"messages": messages, "max_tokens": max_tokens, "stream": False}
+    def stopped():
+        if cancel_event is not None and cancel_event.is_set():
+            return finish('cancelled', 'Run cancelled.')
+        if time.monotonic() - started >= budget.max_seconds or generated >= budget.max_generated_tokens:
+            return finish('budget_exhausted', 'Run budget exhausted; work may be incomplete.')
+        return None
+
+    for step in range(budget.max_steps):
+        if result := stopped():
+            return result
+        steps = step + 1
+        emit({'type': 'model_started', 'step': steps})
+        kwargs = {'messages': messages,
+                  'max_tokens': min(max_tokens, budget.max_generated_tokens - generated), 'stream': False}
         if schemas:
-            call_kwargs["tools"] = schemas
-
-        with Live(Spinner("dots", text=f"Thinking... (step {iteration + 1})"),
-                   console=console, refresh_per_second=4) as live:
-            response = llm.create_chat_completion(**call_kwargs)
-
-        choice = response["choices"][0]
-        message = choice["message"]
-        finish_reason = choice.get("finish_reason", "unknown")
-
-        # Debug: show what the LLM returned
-        has_tool_calls = bool(message.get("tool_calls"))
-        content_preview = (message.get("content") or "")[:80]
-        console.print(
-            f"[dim]  finish_reason={finish_reason}, "
-            f"tool_calls={has_tool_calls}, "
-            f"content={'repr: ' + repr(content_preview) if content_preview else '(empty)'}[/dim]"
-        )
-        console.print(f"[dim]  raw message keys: {list(message.keys())}[/dim]")
-        if message.get("content"):
-            console.print(f"[dim]  raw content: {repr(message['content'][:200])}[/dim]")
-
-        tool_calls = message.get("tool_calls")
-
-        # Fallback: model emitted the tool call as a JSON block in content
-        if not tool_calls:
-            tool_calls = _parse_inline_tool_calls(message.get("content", ""))
-            if tool_calls:
-                console.print(f"[dim]  (parsed {len(tool_calls)} inline tool call(s) from content)[/dim]")
-                message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
-
-        if tool_calls:
-            messages.append(message)
-
-            for tool_call in tool_calls:
-                fn_name = tool_call["function"]["name"]
-                fn_args_raw = tool_call["function"]["arguments"]
-
-                if isinstance(fn_args_raw, str):
-                    try:
-                        fn_args = json.loads(fn_args_raw)
-                    except json.JSONDecodeError:
-                        fn_args = {}
-                else:
-                    fn_args = fn_args_raw
-
-                console.print(f"  [dim]tool: {fn_name}({_format_args(fn_args)})[/dim]")
-
-                if mcp_client and mcp_client.is_connected:
-                    result = mcp_client.call_tool(fn_name, fn_args)
-                    result_preview = str(result)[:120]
-                    console.print(f"  [dim]result: {result_preview}{'...' if len(str(result)) > 120 else ''}[/dim]")
-                else:
-                    result = f"Error: MCP client not connected, cannot call tool '{fn_name}'"
-
-                # Ensure result is a non-empty string
-                if not result:
-                    result = "(empty result)"
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.get("id", f"call_{iteration}"),
-                    "content": str(result)
-                })
-
+            kwargs['tools'] = schemas
+        try:
+            response = llm.create_chat_completion(**kwargs)
+            choice = response['choices'][0]
+            message = choice['message']
+            if not isinstance(message, dict):
+                raise ValueError('Model returned an invalid message')
+        except KeyboardInterrupt:
+            return finish('cancelled', 'Run cancelled.')
+        except Exception as exc:
+            return finish('blocked', f'Model request failed: {exc}', 'model_error')
+        usage = response.get('usage', {}).get('completion_tokens')
+        generated += usage if isinstance(usage, int) else max(1, len(json.dumps(message)) // 4)
+        if result := stopped():
+            return result
+        if choice.get('finish_reason') == 'length':
+            return finish('budget_exhausted', message.get('content') or 'Model output was truncated.', 'output_truncated')
+        if choice.get('finish_reason') in ('content_filter', 'error'):
+            return finish('blocked', 'Model could not complete this request.', 'model_rejected')
+        calls = message.get('tool_calls') or []
+        if not calls and inline_tool_calls:
+            calls = _parse_inline_tool_calls(message.get('content'))
+            if calls:
+                message = {'role': 'assistant', 'content': None, 'tool_calls': calls}
+        if not calls:
+            text = message.get('content')
+            if text:
+                messages.append({'role': 'assistant', 'content': text})
+                emit({'type': 'assistant_text', 'text': text})
+                return finish('completed', text)
+            messages.append({'role': 'user', 'content': 'You must respond with an answer or a valid tool call.'})
             continue
-
-        final_text = message.get("content", "")
-        if final_text:
-            messages.append({"role": "assistant", "content": final_text})
-            return final_text
-
-        # LLM returned empty content with no tool calls — nudge it
-        console.print("[dim]Empty response from LLM, nudging...[/dim]")
+        if not isinstance(calls, list):
+            return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
+        # Validate the envelope before appending it so transcripts remain resumable.
+        ids = set()
+        for call in calls:
+            if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
+                return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
+            key = call.get('id') or f'call_{step}_{len(ids)}'
+            if key in ids:
+                return finish('blocked', 'Model returned duplicate tool call IDs.', 'invalid_protocol')
+            call['id'] = key
+            ids.add(key)
         messages.append(message)
-        messages.append({
-            "role": "user",
-            "content": (
-                "You must respond. If you need filesystem information, call the appropriate tool "
-                "(e.g. list_directory, read_file). Otherwise provide your answer now."
-            )
-        })
-        continue
+        halt = None
+        for call in calls:
+            name = call['function'].get('name')
+            raw = call['function'].get('arguments')
+            emit({'type': 'tool_started', 'name': name, 'call_id': call['id']})
+            try:
+                if halt:
+                    raise ValueError('Run stopped; tool was not executed')
+                if result := stopped():
+                    halt = result
+                    raise ValueError('Run stopped; tool was not executed')
+                if name not in registered:
+                    raise ValueError(f'Unknown or unavailable tool: {name}')
+                args = json.loads(raw) if isinstance(raw, str) else raw
+                validate(args, registered[name])
+                output = mcp_client.call_tool(name, args) or '(empty result)'
+                output = str(output)
+            except (ValueError, TypeError, ValidationError) as exc:
+                output = f'Error: invalid tool call: {exc}'
+            except KeyboardInterrupt:
+                halt = finish('cancelled', 'Run cancelled.')
+                output = 'Error: tool interrupted'
+            except Exception as exc:
+                output = f'Error: tool failed: {exc}'
+            messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': output})
+            emit({'type': 'tool_finished', 'name': name, 'call_id': call['id'], 'output': output})
+            fingerprint = json.dumps([name, raw], sort_keys=True)
+            if output.startswith('Error:'):
+                failures[fingerprint] = failures.get(fingerprint, 0) + 1
+                if failures[fingerprint] >= 3:
+                    halt = finish('blocked', f'Repeated tool failure: {output}', 'repeated_tool_failure')
+            else:
+                failures.pop(fingerprint, None)
+        if halt:
+            return halt
+    return finish('budget_exhausted', 'Step budget exhausted; work may be incomplete.', 'step_limit')
 
-    # Exhausted iterations — force a final text answer without tools
-    console.print("[dim]Reached tool call limit, generating final answer...[/dim]")
-    messages.append({
-        "role": "user",
-        "content": "Please provide your final answer now based on what you have learned."
-    })
-    response = llm.create_chat_completion(
-        messages=messages,
-        max_tokens=max_tokens,
-        stream=False
-    )
-    final_text = response["choices"][0]["message"].get("content", "")
-    messages.append({"role": "assistant", "content": final_text})
-    return final_text
+
+def run_agent_loop(llm, messages, console, max_tokens=512, mcp_client=None, **kwargs):
+    """Compatibility text interface. New integrations should consume run_agent's result."""
+    def emit(event):
+        if event['type'] == 'tool_started':
+            console.print(f"[dim]tool: {event['name']}[/dim]")
+    result = run_agent(llm, messages, max_tokens, mcp_client, emit=emit, **kwargs)
+    if result.status != 'completed':
+        console.print(f'[{result.status}] {result.text}', markup=False)
+    return result.text
 
 
 def _parse_inline_tool_calls(content):

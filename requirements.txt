@@ -2,3 +2,4 @@ typer
 llama-cpp-python
 rich
 mcp
+jsonschema
