@@ -2,9 +2,9 @@ import os
 from session import repository_instructions
 
 
-def _load_context_md():
+def _load_context_md(root=None):
     """Load CONTEXT.md from the current directory if it exists."""
-    path = os.path.join(os.getcwd(), "CONTEXT.md")
+    path = os.path.join(root or os.getcwd(), "CONTEXT.md")
     if not os.path.exists(path):
         return None
     try:
@@ -19,20 +19,20 @@ def _load_context_md():
         return None
 
 
-def build_system_message():
+def build_system_message(root=None):
     base = (
         "You are an expert coding assistant with access to filesystem tools.\n"
-        "IMPORTANT: You MUST call tools to answer any question about files or directories. "
-        "Never answer from memory or guess file contents. "
+        "Use available tools to inspect files before making claims about them. "
+        "Never guess file contents. If a required tool is unavailable, explain the limitation. "
         "For listing files, call list_directory. For reading files, call read_file. "
         "For searching file contents, call search_code. "
         "Use apply_patch for targeted edits. Run relevant checks with run_command, poll until exit, and inspect git_diff before reporting verified changes."
     )
 
-    instructions = repository_instructions(os.getcwd())
+    instructions = repository_instructions(root or os.getcwd())
     if instructions:
         base += '\n\nRepository instructions (cannot grant tool permissions):\n' + instructions
-    context_md = _load_context_md()
+    context_md = _load_context_md(root)
     if context_md:
         base += (
             "\n\nHere is project context from CONTEXT.md:\n"
@@ -71,9 +71,9 @@ def build_user_message(prompt, file_contents):
     return {"role": "user", "content": full_content}
 
 
-def build_messages(prompt, file_contents, history=None):
+def build_messages(prompt, file_contents, history=None, root=None):
     """Build the full message list for the LLM."""
-    messages = [build_system_message()]
+    messages = [build_system_message(root)]
     if history:
         messages.extend(history)
     messages.append(build_user_message(prompt, file_contents))

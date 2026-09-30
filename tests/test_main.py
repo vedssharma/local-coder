@@ -250,3 +250,12 @@ class TestHandleModelCommand:
         monkeypatch.setattr("builtins.input", lambda _: "1")
         app_module.handle_model_command()
         assert "path" in loaded
+
+
+def test_configure_openai_profile(config_dir):
+    result = runner.invoke(app, ['models', '--backend', 'openai', '--base-url', 'http://127.0.0.1:8080/v1', '--model-name', 'coder', '--no-tools'])
+    assert result.exit_code == 0, result.output
+    import config
+    profile = config.get_model_config()
+    assert profile['backend'] == 'openai' and profile['model'] == 'coder'
+    assert profile['supports_tools'] is False

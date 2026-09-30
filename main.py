@@ -2,8 +2,10 @@ from prompt_builder import build_messages, build_edit_system_message, build_user
 from helpers import parse_file_references
 from agent import run_agent_loop
 from mcp_client import MCPClient
-from workspace_tools import WorkspaceTools, MODES
-from session import SessionStore, ContextManager
+from workspace_tools import WorkspaceTools
+from runtime import Runtime
+from model_backend import create_model, EmbeddedModel
+from agent import RunBudget
 import config
 import os
 import glob
@@ -24,27 +26,21 @@ _mcp_client = None
 def get_mcp_client():
     """Lazy-initialize and return the MCP filesystem client."""
     global _mcp_client
-    if _mcp_client is None:
+    if _mcp_client is None or not _mcp_client.is_connected:
         _mcp_client = MCPClient()
         typer.echo("Connecting to MCP filesystem server...")
         _mcp_client.connect()
         if _mcp_client.is_connected:
             typer.echo(f"MCP connected ({len(_mcp_client.tool_names)} tools available)")
         else:
-            typer.echo("MCP unavailable — no tools will be available")
+            typer.echo("MCP unavailable; native tools remain available")
     return _mcp_client
 
 def get_llm():
     """Lazy load the LLM model."""
     global llm
     if llm is None:
-        model_config = config.get_model_config()
-        llm = Llama(
-            model_path=model_config["model_path"],
-            n_ctx=model_config["n_ctx"],
-            n_gpu_layers=model_config["n_gpu_layers"],
-            verbose=False
-        )
+        llm = create_model(config.get_model_config())
     return llm
 
 
@@ -93,8 +89,13 @@ def handle_model_command():
     typer.echo(f"Loading model: {new_path}...")
     try:
         abs_path = os.path.abspath(new_path)
-        llm = Llama(model_path=abs_path, n_ctx=8192, n_gpu_layers=-1, verbose=False)
+        loaded = Llama(model_path=abs_path, n_ctx=current_config['n_ctx'], n_gpu_layers=current_config['n_gpu_layers'], verbose=False)
         config.set_model_path(abs_path)
+        profile = config.get_model_config()
+        profile['backend'] = 'embedded'
+        config.save_config(profile)
+        llm = EmbeddedModel(profile)
+        llm._model = loaded
         typer.echo(f"Switched to: {os.path.basename(abs_path)}\n")
     except Exception as e:
         typer.echo(f"Error loading model: {e}\n")
@@ -203,146 +204,116 @@ def handle_md_command(console, max_tokens):
         typer.echo("Write cancelled.\n")
 
 
+def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console):
+    streamed = False
+    def emit(event):
+        nonlocal streamed
+        if event['type'] == 'assistant_delta':
+            streamed = True
+            console.print(event['text'], end='', markup=False, highlight=False)
+        elif event['type'] == 'tool_started':
+            console.print(f"Tool: {event['name']}", markup=False)
+        elif event['type'] == 'assistant_text' and not streamed:
+            console.print(Markdown(event['text']))
+        elif event['type'] == 'run_finished':
+            console.print()
+            if event['status'] != 'completed':
+                console.print(f"Run {event['status']}: {event['reason']}", markup=False)
+            streamed = False
+    return Runtime(get_llm(), os.getcwd(), config.CONFIG_DIR, mode=mode,
+        mcp_client=None if no_mcp else get_mcp_client(), emit=emit,
+        budget=RunBudget(max_steps, max_seconds, token_budget),
+        context_window=config.get_model_config()['n_ctx'], trace=trace)
+
+
+def execute_turn(runtime, prompt, max_tokens):
+    original, files = parse_file_references(prompt, root=runtime.tools.root)
+    result = runtime.turn(original, files, max_tokens)
+    typer.echo(f'Session: {runtime.session_id}; outcome: {result.status}')
+    if result.status != 'completed':
+        typer.echo(result.text)
+    return result
+
+
 @app.command()
 def ask(
-    prompt: str = typer.Argument(..., help="Coding question"),
-    max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate"),
-    no_mcp: bool = typer.Option(False, "--no-mcp", help="Disable MCP filesystem server"),
-    mode: str = typer.Option("read-only", "--mode", help="read-only, workspace-edit, or execute")
+    prompt: str = typer.Argument(...),
+    max_tokens: int = typer.Option(512, '--max-tokens', '-n', min=1),
+    no_mcp: bool = typer.Option(True, '--no-mcp/--mcp', help='Native tools are always available; MCP is optional'),
+    mode: str = typer.Option('read-only', '--mode'),
+    max_steps: int = typer.Option(30, min=1),
+    max_seconds: float = typer.Option(300, min=1),
+    token_budget: int = typer.Option(8192, min=1),
+    trace: bool = typer.Option(False, '--trace'),
 ):
-    """Ask a coding question with optional file references using @file syntax"""
-    console = Console()
-    original_prompt, file_contents = parse_file_references(prompt)
-    messages = build_messages(original_prompt, file_contents)
-
-    mcp = WorkspaceTools(mcp_client=None if no_mcp else get_mcp_client(), mode=mode)
-    final_answer = run_agent_loop(
-        llm=get_llm(),
-        messages=messages,
-        console=console,
-        max_tokens=max_tokens,
-        mcp_client=mcp
-    )
-
-    console.print()
-    console.print(Markdown(final_answer))
-    console.print()
+    """Ask a question or run a bounded coding task."""
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console()) as runtime:
+        result = execute_turn(runtime, prompt, max_tokens)
+    if result.status != 'completed':
+        raise typer.Exit(1)
 
 
 @app.command()
 def chat(
-    max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate"),
-    no_mcp: bool = typer.Option(False, "--no-mcp", help="Disable MCP filesystem server"),
-    mode: str = typer.Option("read-only", "--mode", help="read-only, workspace-edit, or execute"),
-    resume: str = typer.Option(None, "--resume", help="Resume a saved session ID")
+    max_tokens: int = typer.Option(512, '--max-tokens', '-n', min=1),
+    no_mcp: bool = typer.Option(True, '--no-mcp/--mcp', help='Native tools are always available; MCP is optional'),
+    mode: str = typer.Option('read-only', '--mode'),
+    resume: str = typer.Option(None, '--resume'),
+    max_steps: int = typer.Option(30, min=1),
+    max_seconds: float = typer.Option(300, min=1),
+    token_budget: int = typer.Option(8192, min=1),
+    trace: bool = typer.Option(False, '--trace'),
 ):
-    """Start an interactive chat session. Type /exit to quit."""
+    """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /exit."""
     console = Console()
-    typer.echo("Starting interactive chat session. Type /exit to quit.\n")
-
-    mcp = WorkspaceTools(mcp_client=None if no_mcp else get_mcp_client(), mode=mode)
-    store = SessionStore(config.CONFIG_DIR / 'sessions', os.getcwd())
-    history = store.load(resume) if resume else []
-    session_id = resume
-    context = ContextManager(config.get_model_config()['n_ctx'],
-        artifact_dir=os.path.join(os.getcwd(), '.local-coder', 'artifacts'))
-
-    try:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console) as runtime:
+        if resume:
+            runtime.resume(resume)
         while True:
             try:
-                prompt = typer.prompt("\nYou")
-
-                if prompt.strip().lower() == "/exit":
-                    typer.echo("Goodbye!")
+                prompt = typer.prompt('You').strip()
+                if prompt == '/exit':
                     break
-
-                if prompt.strip() == '/undo':
-                    try:
-                        typer.echo(mcp.undo_last())
-                    except (OSError, ValueError) as exc:
-                        typer.echo(f'Cannot undo: {exc}')
-                    continue
-                if prompt.startswith('/resume '):
-                    candidate = prompt.split(maxsplit=1)[1].strip()
-                    try:
-                        history = store.load(candidate)
-                        session_id = candidate
-                        typer.echo(f'Resumed {session_id}')
-                    except (OSError, ValueError) as exc:
-                        typer.echo(f'Cannot resume: {exc}')
-                    continue
-                if prompt.strip() == '/sessions':
-                    typer.echo('\n'.join(store.list()) or 'No saved sessions.')
-                    continue
-                if prompt.strip() == '/new':
-                    history, session_id = [], None
-                    continue
-                if prompt.strip().lower() == "/model":
+                if prompt == '/sessions':
+                    typer.echo('\n'.join(runtime.store.list()) or 'No saved sessions.')
+                elif prompt.startswith('/resume '):
+                    runtime.resume(prompt.split(maxsplit=1)[1])
+                elif prompt == '/new':
+                    runtime.new()
+                elif prompt == '/undo':
+                    typer.echo(runtime.tools.undo_last())
+                elif prompt == '/model':
                     handle_model_command()
-                    continue
-
-                if prompt.strip().lower() == "/md":
+                    runtime.model = get_llm()
+                    from model_backend import ModelAdapter
+                    runtime.context.count_tokens = runtime.model.count_tokens if isinstance(runtime.model, ModelAdapter) else runtime.context.count_tokens
+                elif prompt == '/md':
                     handle_md_command(console, max_tokens)
-                    continue
-
-                if not prompt.strip():
-                    continue
-
-                original_prompt, file_contents = parse_file_references(prompt)
-                messages = build_messages(original_prompt, file_contents, history=[m for m in history if m.get('role') != 'system'])
-                memories = [m for m in history if m.get('name') == 'working_memory']
-                messages[1:1] = memories
-
-                typer.echo("\nAssistant:")
-                final_answer = run_agent_loop(
-                    llm=get_llm(),
-                    messages=messages,
-                    console=console,
-                    max_tokens=max_tokens,
-                    mcp_client=mcp, context_manager=context
-                )
-
-                console.print(Markdown(final_answer))
-                console.print()
-
-                history = messages
-                session_id = store.save(history, session_id)
-                typer.echo(f'Session: {session_id}')
-
+                elif prompt:
+                    execute_turn(runtime, prompt, max_tokens)
             except (KeyboardInterrupt, EOFError):
-                typer.echo("\n\nGoodbye!")
                 break
-    finally:
-        if mcp and mcp.is_connected:
-            mcp.close()
+            except (OSError, ValueError) as exc:
+                typer.echo(str(exc), err=True)
 
 
 @app.command()
 def edit(
-    prompt: str = typer.Argument(..., help="Edit request (use @file syntax to reference files)"),
-    max_tokens: int = typer.Option(2048, "--max-tokens", "-n", help="Max number of tokens"),
-    mode: str = typer.Option("workspace-edit", "--mode", help="workspace-edit or execute"),
+    prompt: str = typer.Argument(...),
+    max_tokens: int = typer.Option(2048, '--max-tokens', '-n', min=1),
+    mode: str = typer.Option('workspace-edit', '--mode'),
+    no_mcp: bool = typer.Option(True, '--no-mcp/--mcp', help='Native tools are always available; MCP is optional'),
+    max_steps: int = typer.Option(30, min=1),
+    max_seconds: float = typer.Option(300, min=1),
+    token_budget: int = typer.Option(8192, min=1),
+    trace: bool = typer.Option(False, '--trace'),
 ):
-    """Request code changes. Reference files with @file syntax."""
-    console = Console()
-    original_prompt, file_contents = parse_file_references(prompt)
+    """Apply targeted edits; --mode execute also permits validation commands."""
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console()) as runtime:
+        result = execute_turn(runtime, prompt, max_tokens)
+    if result.status != 'completed':
+        raise typer.Exit(1)
 
-    messages = [build_edit_system_message()]
-    messages.append(build_user_message(original_prompt, file_contents))
-
-    mcp = WorkspaceTools(mcp_client=get_mcp_client(), mode=mode)
-    typer.echo("Generating changes...\n")
-    final_answer = run_agent_loop(
-        llm=get_llm(),
-        messages=messages,
-        console=console,
-        max_tokens=max_tokens,
-        mcp_client=mcp
-    )
-
-    if final_answer:
-        console.print(Markdown(final_answer))
-        console.print()
 
 @app.command()
 def undo():
@@ -356,10 +327,30 @@ def undo():
 
 @app.command()
 def models(
-    set_model: str = typer.Option(None, "--set", "-s", help="Path to GGUF model file to use")
+    set_model: str = typer.Option(None, "--set", "-s", help="Path to GGUF model file to use"),
+    backend: str = typer.Option(None, '--backend', help='embedded or openai'),
+    base_url: str = typer.Option(None, '--base-url'),
+    model_name: str = typer.Option(None, '--model-name'),
+    context_window: int = typer.Option(None, '--context-window', min=1024),
+    chat_format: str = typer.Option(None, '--chat-format'),
+    supports_tools: bool = typer.Option(None, '--tools/--no-tools'),
+    streaming: bool = typer.Option(None, '--stream/--no-stream'),
 ):
     """Show current model or set a new model."""
-    console = Console()
+    global llm
+    updates = {'backend': backend, 'base_url': base_url, 'model': model_name,
+               'n_ctx': context_window, 'chat_format': chat_format,
+               'supports_tools': supports_tools, 'stream': streaming}
+    updates = {k: v for k, v in updates.items() if v is not None}
+    if updates:
+        profile = {**config.get_model_config(), **updates}
+        try:
+            create_model(profile)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc))
+        config.save_config(profile)
+        llm = None
+        typer.echo('Model profile updated.')
 
     if set_model:
         # User wants to change the model
@@ -376,6 +367,10 @@ def models(
 
         # Update configuration
         if config.set_model_path(abs_path):
+            profile = config.get_model_config()
+            profile['backend'] = 'embedded'
+            config.save_config(profile)
+            llm = None
             typer.echo(f"✓ Model updated successfully!")
             typer.echo(f"  New model: {abs_path}")
             typer.echo(f"\nNote: Restart the application for the change to take effect.")
@@ -388,6 +383,10 @@ def models(
         model_path = current_config["model_path"]
 
         typer.echo("Current Model Configuration:")
+        typer.echo(f"  Backend: {current_config['backend']}")
+        if current_config['backend'] == 'openai':
+            typer.echo(f"  Server: {current_config.get('base_url', 'http://127.0.0.1:8080/v1')}")
+            typer.echo(f"  Model: {current_config.get('model', 'local-model')}")
         typer.echo(f"  Model path: {model_path}")
         typer.echo(f"  Context size: {current_config['n_ctx']}")
         typer.echo(f"  GPU layers: {current_config['n_gpu_layers']}")

@@ -47,6 +47,9 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     budget = budget or RunBudget()
     emit = emit or (lambda event: None)
     schemas = _build_tool_schemas(mcp_client)
+    from model_backend import ModelAdapter
+    if isinstance(llm, ModelAdapter) and not llm.profile.get("supports_tools", True):
+        schemas = []
     registered = {s['function']['name']: s['function'].get('parameters', {'type': 'object'})
                   for s in schemas}
     context_manager = context_manager or ContextManager(window=32768)
@@ -57,10 +60,10 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         emit({'type': 'run_finished', 'status': status, 'reason': reason})
         return result
 
-    def stopped():
+    def stopped(check_tokens=True):
         if cancel_event is not None and cancel_event.is_set():
             return finish('cancelled', 'Run cancelled.')
-        if time.monotonic() - started >= budget.max_seconds or generated >= budget.max_generated_tokens:
+        if time.monotonic() - started >= budget.max_seconds or (check_tokens and generated >= budget.max_generated_tokens):
             return finish('budget_exhausted', 'Run budget exhausted; work may be incomplete.')
         return None
 
@@ -85,8 +88,8 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         except Exception as exc:
             return finish('blocked', f'Model request failed: {exc}', 'model_error')
         usage = response.get('usage', {}).get('completion_tokens')
-        generated += usage if isinstance(usage, int) else max(1, len(json.dumps(message)) // 4)
-        if result := stopped():
+        generated += usage if isinstance(usage, int) and usage >= 0 else max(1, context_manager.count_tokens(json.dumps(message)))
+        if result := stopped(check_tokens=False):
             return result
         if choice.get('finish_reason') == 'length':
             return finish('budget_exhausted', message.get('content') or 'Model output was truncated.', 'output_truncated')
