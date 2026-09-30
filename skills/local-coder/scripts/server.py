@@ -18,7 +18,7 @@ import uuid
 # Ensure local-coder modules are importable (server runs from project root)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Move up one more level to the local-coder project root
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, project_root)
 os.chdir(project_root)
 
@@ -67,8 +67,10 @@ def _get_mcp_client(disable: bool = False):
         return None
     if _mcp_client is None:
         from mcp_client import MCPClient
-        _mcp_client = MCPClient()
-        _mcp_client.connect()
+        from workspace_tools import WorkspaceTools
+        client = MCPClient()
+        client.connect()
+        _mcp_client = WorkspaceTools(mcp_client=client)
     return _mcp_client
 
 

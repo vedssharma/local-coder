@@ -2,6 +2,7 @@ from prompt_builder import build_messages, build_edit_system_message, build_user
 from helpers import parse_file_references
 from agent import run_agent_loop
 from mcp_client import MCPClient
+from workspace_tools import WorkspaceTools
 import config
 import os
 import glob
@@ -212,7 +213,7 @@ def ask(
     original_prompt, file_contents = parse_file_references(prompt)
     messages = build_messages(original_prompt, file_contents)
 
-    mcp = None if no_mcp else get_mcp_client()
+    mcp = WorkspaceTools(mcp_client=None if no_mcp else get_mcp_client())
     final_answer = run_agent_loop(
         llm=get_llm(),
         messages=messages,
@@ -235,7 +236,7 @@ def chat(
     console = Console()
     typer.echo("Starting interactive chat session. Type /exit to quit.\n")
 
-    mcp = None if no_mcp else get_mcp_client()
+    mcp = WorkspaceTools(mcp_client=None if no_mcp else get_mcp_client())
     history = []
 
     try:
@@ -301,7 +302,7 @@ def edit(
     messages = [build_edit_system_message()]
     messages.append(build_user_message(original_prompt, file_contents))
 
-    mcp = get_mcp_client()
+    mcp = WorkspaceTools(mcp_client=get_mcp_client())
     typer.echo("Generating changes...\n")
     final_answer = run_agent_loop(
         llm=get_llm(),

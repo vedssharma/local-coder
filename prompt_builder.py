@@ -24,8 +24,8 @@ def build_system_message():
         "IMPORTANT: You MUST call tools to answer any question about files or directories. "
         "Never answer from memory or guess file contents. "
         "For listing files, call list_directory. For reading files, call read_file. "
-        "For searching code, call search_files. "
-        "Always call a tool first, then summarize the result in your answer."
+        "For searching file contents, call search_code. "
+        "Use apply_patch for targeted edits. Run relevant checks with run_command, poll until exit, and inspect git_diff before reporting verified changes."
     )
 
     context_md = _load_context_md()
@@ -43,7 +43,7 @@ def build_edit_system_message():
         "role": "system",
         "content": (
             "You are an expert coding assistant that edits code files. "
-            "IMPORTANT: Always call read_file first to read the target file, then call write_file to apply your changes. "
+            "IMPORTANT: Always call read_file first to read the target file, then call apply_patch to apply targeted changes and run relevant checks. "
             "Never guess file contents — read them first. Use tools, then summarize what you did."
         )
     }
