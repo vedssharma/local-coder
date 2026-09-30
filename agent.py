@@ -6,6 +6,7 @@ import time
 from typing import Literal
 
 from jsonschema import validate, ValidationError
+from session import ContextManager
 
 MAX_AGENT_ITERATIONS = 10
 
@@ -37,7 +38,7 @@ def _build_tool_schemas(mcp_client=None):
 
 
 def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
-              cancel_event=None, emit=None, inline_tool_calls=False):
+              cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None):
     """Run a turn. Completion means the model finished, not that its claims were verified.
 
     Time and cancellation are checked between model/tool operations. Blocking model
@@ -48,6 +49,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     schemas = _build_tool_schemas(mcp_client)
     registered = {s['function']['name']: s['function'].get('parameters', {'type': 'object'})
                   for s in schemas}
+    context_manager = context_manager or ContextManager(window=32768)
     started, generated, failures, steps = time.monotonic(), 0, {}, 0
 
     def finish(status, text, reason=''):
@@ -72,6 +74,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         if schemas:
             kwargs['tools'] = schemas
         try:
+            context_manager.fit(messages, schemas, kwargs['max_tokens'])
             response = llm.create_chat_completion(**kwargs)
             choice = response['choices'][0]
             message = choice['message']
@@ -100,7 +103,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 messages.append({'role': 'assistant', 'content': text})
                 emit({'type': 'assistant_text', 'text': text})
                 return finish('completed', text)
-            messages.append({'role': 'user', 'content': 'You must respond with an answer or a valid tool call.'})
+            messages.append({'role': 'user', 'name': 'agent_recovery', 'content': 'You must respond with an answer or a valid tool call.'})
             continue
         if not isinstance(calls, list):
             return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
@@ -139,6 +142,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 output = 'Error: tool interrupted'
             except Exception as exc:
                 output = f'Error: tool failed: {exc}'
+            output = context_manager.bound_output(output)
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': output})
             emit({'type': 'tool_finished', 'name': name, 'call_id': call['id'], 'output': output})
             fingerprint = json.dumps([name, raw], sort_keys=True)

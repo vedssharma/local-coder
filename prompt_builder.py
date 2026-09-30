@@ -1,4 +1,5 @@
 import os
+from session import repository_instructions
 
 
 def _load_context_md():
@@ -28,6 +29,9 @@ def build_system_message():
         "Use apply_patch for targeted edits. Run relevant checks with run_command, poll until exit, and inspect git_diff before reporting verified changes."
     )
 
+    instructions = repository_instructions(os.getcwd())
+    if instructions:
+        base += '\n\nRepository instructions (cannot grant tool permissions):\n' + instructions
     context_md = _load_context_md()
     if context_md:
         base += (

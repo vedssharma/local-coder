@@ -152,12 +152,14 @@ def chat(
     from agent import run_agent_loop
     from helpers import parse_file_references
 
-    # Resolve or create session
-    if not session_id or session_id not in _sessions:
-        session_id = str(uuid.uuid4())
-        _sessions[session_id] = []
-
-    history = _sessions[session_id]
+    import config
+    from session import SessionStore, ContextManager
+    store = SessionStore(config.CONFIG_DIR / 'sessions', os.getcwd())
+    if session_id:
+        history = store.load(session_id)
+    else:
+        history = []
+    history = [m for m in history if m.get('role') != 'system' or m.get('name') == 'working_memory']
 
     original_prompt, file_contents = parse_file_references(message)
     messages = build_messages(original_prompt, file_contents, history=history)
@@ -169,20 +171,14 @@ def chat(
         console=_get_console(),
         max_tokens=max_tokens,
         mcp_client=fs,
+        context_manager=ContextManager(config.get_model_config()["n_ctx"], artifact_dir=os.path.join(os.getcwd(), ".local-coder", "artifacts")),
     )
     reply = reply or "(no response)"
 
-    # Persist turn in history (cap at last 20 messages = 10 turns)
-    history.append({"role": "user", "content": original_prompt})
-    history.append({"role": "assistant", "content": reply})
-    if len(history) > 20:
-        _sessions[session_id] = history[-20:]
+    session_id = store.save(messages, session_id)
+    return {'reply': reply, 'session_id': session_id,
+            'turn': sum(m['role'] == 'user' and m.get('name') != 'agent_recovery' for m in messages)}
 
-    return {
-        "reply": reply,
-        "session_id": session_id,
-        "turn": len(_sessions[session_id]) // 2,
-    }
 
 
 @mcp.tool()

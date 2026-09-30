@@ -3,6 +3,7 @@ from helpers import parse_file_references
 from agent import run_agent_loop
 from mcp_client import MCPClient
 from workspace_tools import WorkspaceTools
+from session import SessionStore, ContextManager
 import config
 import os
 import glob
@@ -230,14 +231,19 @@ def ask(
 @app.command()
 def chat(
     max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate"),
-    no_mcp: bool = typer.Option(False, "--no-mcp", help="Disable MCP filesystem server")
+    no_mcp: bool = typer.Option(False, "--no-mcp", help="Disable MCP filesystem server"),
+    resume: str = typer.Option(None, "--resume", help="Resume a saved session ID")
 ):
     """Start an interactive chat session. Type /exit to quit."""
     console = Console()
     typer.echo("Starting interactive chat session. Type /exit to quit.\n")
 
     mcp = WorkspaceTools(mcp_client=None if no_mcp else get_mcp_client())
-    history = []
+    store = SessionStore(config.CONFIG_DIR / 'sessions', os.getcwd())
+    history = store.load(resume) if resume else []
+    session_id = resume
+    context = ContextManager(config.get_model_config()['n_ctx'],
+        artifact_dir=os.path.join(os.getcwd(), '.local-coder', 'artifacts'))
 
     try:
         while True:
@@ -248,6 +254,21 @@ def chat(
                     typer.echo("Goodbye!")
                     break
 
+                if prompt.startswith('/resume '):
+                    candidate = prompt.split(maxsplit=1)[1].strip()
+                    try:
+                        history = store.load(candidate)
+                        session_id = candidate
+                        typer.echo(f'Resumed {session_id}')
+                    except (OSError, ValueError) as exc:
+                        typer.echo(f'Cannot resume: {exc}')
+                    continue
+                if prompt.strip() == '/sessions':
+                    typer.echo('\n'.join(store.list()) or 'No saved sessions.')
+                    continue
+                if prompt.strip() == '/new':
+                    history, session_id = [], None
+                    continue
                 if prompt.strip().lower() == "/model":
                     handle_model_command()
                     continue
@@ -260,7 +281,9 @@ def chat(
                     continue
 
                 original_prompt, file_contents = parse_file_references(prompt)
-                messages = build_messages(original_prompt, file_contents, history=history)
+                messages = build_messages(original_prompt, file_contents, history=[m for m in history if m.get('role') != 'system'])
+                memories = [m for m in history if m.get('name') == 'working_memory']
+                messages[1:1] = memories
 
                 typer.echo("\nAssistant:")
                 final_answer = run_agent_loop(
@@ -268,19 +291,15 @@ def chat(
                     messages=messages,
                     console=console,
                     max_tokens=max_tokens,
-                    mcp_client=mcp
+                    mcp_client=mcp, context_manager=context
                 )
 
                 console.print(Markdown(final_answer))
                 console.print()
 
-                # Store only user/assistant messages for history (not tool call intermediates)
-                history.append({"role": "user", "content": original_prompt})
-                history.append({"role": "assistant", "content": final_answer})
-
-                # Trim history to last 10 turns to manage context window
-                if len(history) > 20:
-                    history = history[-20:]
+                history = messages
+                session_id = store.save(history, session_id)
+                typer.echo(f'Session: {session_id}')
 
             except (KeyboardInterrupt, EOFError):
                 typer.echo("\n\nGoodbye!")

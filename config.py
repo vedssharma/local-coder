@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-CONFIG_DIR = Path.home() / ".local-coder"
+CONFIG_DIR = Path(os.environ.get("LOCAL_CODER_CONFIG_DIR", Path.home() / ".local-coder"))
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {

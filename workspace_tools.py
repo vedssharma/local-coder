@@ -74,7 +74,10 @@ class WorkspaceTools:
                             break
                         if n >= start:
                             lines.append(f'{n}: {line}')
-                return ''.join(lines)[:32000] or '(empty file)'
+                from session import repository_instructions
+                instructions = repository_instructions(self.root, p)
+                result = ''.join(lines)[:32000] or '(empty file)'
+                return result + ('\n\n' + instructions if instructions else '')
             if name == 'list_directory':
                 return '\n'.join(p.name + ('/' if p.is_dir() else '')
                                  for p in sorted(self.path(args.get('path', '.')).iterdir())[:200])
