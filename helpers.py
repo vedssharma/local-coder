@@ -21,7 +21,9 @@ def parse_file_references(prompt: str, root=None) -> tuple[str, dict[str, str]]:
             continue
         try:
             with open(path, 'r', encoding='utf-8') as f:
-                file_contents[file_path] = f.read()
+                file_contents[file_path] = f.read(32000)
+                if f.read(1):
+                    file_contents[file_path] += "\n[preloaded file truncated; use ranged read_file]"
         except Exception as e:
             typer.echo(f"Warning: Could not read {file_path}: {e}", err=True)
     return prompt, file_contents

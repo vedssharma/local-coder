@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     git \
     wget \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file
@@ -17,18 +18,15 @@ COPY requirements.txt .
 
 # Install Python dependencies
 # For CPU-only version (default)
-RUN pip install --no-cache-dir -r requirements.txt
+RUN CMAKE_BUILD_PARALLEL_LEVEL=2 pip install --no-cache-dir -r requirements.txt
 
 # For GPU support, uncomment the following and comment the line above:
 # RUN CMAKE_ARGS="-DGGML_CUDA=on" pip install --no-cache-dir llama-cpp-python --force-reinstall && \
 #     pip install --no-cache-dir typer rich
 
 # Copy application files
-COPY main.py .
-COPY helpers.py .
-COPY prompt_builder.py .
-COPY tools.py .
-COPY agent.py .
+COPY *.py ./
+COPY skills ./skills
 COPY entrypoint.sh .
 
 # Make entrypoint script executable

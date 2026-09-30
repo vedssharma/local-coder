@@ -44,3 +44,24 @@ def test_scoped_instructions(tmp_path):
     (tmp_path / 'other' / 'AGENTS.md').write_text('other rules')
     content = repository_instructions(tmp_path, tmp_path / 'src' / 'a.py')
     assert 'root rules' in content and 'src rules' in content and 'other rules' not in content
+
+
+def test_compaction_preserves_original_task_across_restart():
+    messages = [{'role': 'system', 'content': 'rules'}, {'role': 'user', 'content': 'Fix the payment bug'},
+                {'role': 'assistant', 'content': 'x' * 2000}, {'role': 'user', 'content': 'continue'}]
+    context = ContextManager(2200)
+    context.fit(messages, [], 100)
+    assert any('Original task: Fix the payment bug' in m.get('content', '') for m in messages)
+    messages += [{'role': 'assistant', 'content': 'y' * 2000}, {'role': 'user', 'content': 'continue again'}]
+    restored = ContextManager(2200)
+    restored.fit(messages, [], 100)
+    assert any('Original task: Fix the payment bug' in m.get('content', '') for m in messages)
+
+
+def test_output_truncation_handles_unwritable_artifact_location(tmp_path):
+    location = tmp_path / 'file-not-directory'
+    location.write_text('existing user file')
+    context = ContextManager(1000, artifact_dir=location)
+    output = context.bound_output('x' * 10000)
+    assert 'Could not retain full output' in output
+    assert location.read_text() == 'existing user file'

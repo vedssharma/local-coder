@@ -31,7 +31,7 @@ SCHEMAS = [
             'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 300}}, ['argv']),
     schema('poll_process', 'Get command output and exit status.', {'process_id': STRING}, ['process_id']),
     schema('cancel_process', 'Terminate a command process group.', {'process_id': STRING}, ['process_id']),
-    schema('git_diff', 'Show tracked staged and unstaged changes from HEAD.', {}),
+    schema('git_diff', 'Show tracked changes from HEAD and list untracked workspace files.', {}),
 ]
 
 
@@ -127,6 +127,7 @@ class WorkspaceTools:
                     updated = new
                 else:
                     original = p.read_text()
+                    before = original
                     if original.count(old) != 1:
                         raise ValueError('Expected text must match exactly once; reread the file')
                     updated = original.replace(old, new, 1)
@@ -152,7 +153,10 @@ class WorkspaceTools:
                     self._kill(state)
                 return json.dumps(self._poll(args['process_id']))
             if name == 'git_diff':
-                return json.dumps(self._capture(['git', '--no-pager', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--']))
+                result = self._capture(['git', '--no-pager', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--'])
+                untracked = self._capture(['git', '-c', 'core.fsmonitor=false', 'ls-files', '--others', '--exclude-standard', '--exclude=.local-coder/', '-z'])
+                result['untracked_files'] = [p for p in untracked['output'].split('\0') if p]
+                return json.dumps(result)
             if self.mcp_client and self.mcp_client.is_connected:
                 return self.mcp_client.call_tool(name, args)
             raise ValueError(f'Unknown tool: {name}')
@@ -207,11 +211,12 @@ class WorkspaceTools:
                                 start_new_session=True)
         key = uuid.uuid4().hex
         state = {'proc': proc, 'output': b'', 'deadline': time.monotonic() + timeout,
-                 'timed_out': False, 'lock': threading.Lock()}
+                 'timed_out': False, 'output_truncated': False, 'lock': threading.Lock()}
         self.processes[key] = state
         def drain():
             while chunk := proc.stdout.read1(4096):
                 with state['lock']:
+                    state['output_truncated'] |= len(state['output']) + len(chunk) > 32000
                     state['output'] = (state['output'] + chunk)[-32000:]
             proc.stdout.close()
         reader = threading.Thread(target=drain, daemon=True)
@@ -231,12 +236,13 @@ class WorkspaceTools:
         state = self.processes[key]
         code = state['proc'].poll()
         if code is not None:
+            self._kill(state)  # A completed job must not leave background children.
             state['timer'].cancel()
             state['reader'].join(timeout=0.1)
         with state['lock']:
             output = state['output'].decode(errors='replace')
         return {'process_id': key, 'exit_code': code, 'running': code is None,
-                'timed_out': state['timed_out'], 'output': output}
+                'timed_out': state['timed_out'], 'output_truncated': state['output_truncated'], 'output': output}
 
     @staticmethod
     def _kill(state):
@@ -256,8 +262,8 @@ class WorkspaceTools:
 
     def close(self):
         for state in self.processes.values():
-            if state['proc'].poll() is None:
-                self._kill(state)
+            self._kill(state)
             state['timer'].cancel()
+            state['reader'].join(timeout=0.5)
         if self.mcp_client:
             self.mcp_client.close()

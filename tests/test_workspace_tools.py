@@ -80,3 +80,29 @@ def test_mcp_cannot_bypass_permissions(tmp_path):
     assert tools.call_tool('write_file', {'path': 'a', 'content': 'bad'}).startswith('Error')
     assert tools.call_tool('read_text_file', {'path': '../outside'}).startswith('Error')
     client.call_tool.assert_not_called()
+
+
+def test_diff_includes_new_files_and_output_marks_truncation(tmp_path):
+    import subprocess
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                    'commit', '--allow-empty', '-qm', 'initial'], cwd=tmp_path, check=True)
+    tools = WorkspaceTools(tmp_path, mode='execute')
+    assert tools.call_tool('apply_patch', {'path': 'new.py', 'old_text': '', 'new_text': 'x = 1\n'}).startswith('Patched')
+    diff = json.loads(tools.call_tool('git_diff', {}))
+    assert diff['untracked_files'] == ['new.py']
+    result = wait(tools, json.loads(tools.call_tool('run_command', {'argv': [sys.executable, '-c', 'print("x" * 100000)']})))
+    assert result['output_truncated'] and len(result['output']) <= 32000
+    tools.close()
+
+
+def test_finished_command_does_not_leave_background_pipe_open(tmp_path):
+    tools = WorkspaceTools(tmp_path, mode='execute')
+    try:
+        result = wait(tools, json.loads(tools.call_tool('run_command', {'argv': [sys.executable, '-c',
+            'import subprocess, sys; subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])']})))
+        state = tools.processes[result['process_id']]
+        state['reader'].join(timeout=1)
+        assert not state['reader'].is_alive()
+    finally:
+        tools.close()

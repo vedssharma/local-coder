@@ -83,6 +83,9 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             message = choice['message']
             if not isinstance(message, dict):
                 raise ValueError('Model returned an invalid message')
+            message['role'] = 'assistant'
+            if message.get('content') is not None and not isinstance(message['content'], str):
+                raise ValueError('Model returned invalid text content')
         except KeyboardInterrupt:
             return finish('cancelled', 'Run cancelled.')
         except Exception as exc:
@@ -116,6 +119,8 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
                 return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
             key = call.get('id') or f'call_{step}_{len(ids)}'
+            if not isinstance(key, str):
+                return finish('blocked', 'Model returned an invalid tool call ID.', 'invalid_protocol')
             if key in ids:
                 return finish('blocked', 'Model returned duplicate tool call IDs.', 'invalid_protocol')
             call['id'] = key

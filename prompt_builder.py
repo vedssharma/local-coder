@@ -1,11 +1,12 @@
 import os
+from pathlib import Path
 from session import repository_instructions
 
 
 def _load_context_md(root=None):
     """Load CONTEXT.md from the current directory if it exists."""
     path = os.path.join(root or os.getcwd(), "CONTEXT.md")
-    if not os.path.exists(path):
+    if not Path(path).resolve().is_relative_to(Path(root or os.getcwd()).resolve()) or not os.path.exists(path):
         return None
     try:
         with open(path, "r") as f:

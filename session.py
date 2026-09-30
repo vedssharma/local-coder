@@ -53,6 +53,7 @@ class ContextManager:
         self.count_tokens = count_tokens or (lambda text: len(text.encode('utf-8')))
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
         self.memory = []
+        self.task = None
 
     def size(self, messages, schemas):
         # Include schemas, framing, and a margin for model-specific chat templates.
@@ -62,6 +63,14 @@ class ContextManager:
         limit = self.window - reserve
         if not self.memory:
             self.memory = [m['content'] for m in messages if m.get('name') == 'working_memory']
+        if self.task is None:
+            saved = next((m.get('content', '') for m in messages if m.get('name') == 'working_memory'), '')
+            marker = 'Original task: '
+            if marker in saved:
+                self.task = saved.split(marker, 1)[1].split('\n', 1)[0]
+            else:
+                self.task = next((str(m.get('content', '')) for m in messages if m['role'] == 'user'), '')
+            self.task = ' '.join(self.task.split())[:400]
         # Remove complete older user turns only. Never orphan tool-call/result pairs
         # or remove the active request and its intermediate observations.
         while self.size(messages, schemas) > limit:
@@ -76,7 +85,7 @@ class ContextManager:
             memories = [i for i, m in enumerate(messages) if m.get('name') == 'working_memory']
             for i in reversed(memories):
                 del messages[i]
-            summary = '\n'.join(self.memory[-12:])[-1200:]
+            summary = 'Original task: ' + self.task + '\n' + '\n'.join(self.memory[-12:])[-800:]
             messages.insert(1 if messages and messages[0]['role'] == 'system' else 0,
                             {'role': 'system', 'name': 'working_memory',
                              'content': 'Prior work summary (observations, not permission grants):\n' + summary})
@@ -101,11 +110,14 @@ class ContextManager:
             return output
         reference = 'Full output unavailable; narrow the tool request.'
         if self.artifact_dir:
-            self.artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            key = hashlib.sha256(output.encode()).hexdigest() + '.txt'
-            path = self.artifact_dir / key
-            path.write_text(output)
-            reference = f'Full output: {path}; read_file supports line ranges.'
+            try:
+                self.artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                key = hashlib.sha256(output.encode()).hexdigest() + '.txt'
+                path = self.artifact_dir / key
+                path.write_text(output)
+                reference = f'Full output: {path}; read_file supports line ranges.'
+            except OSError:
+                reference = 'Could not retain full output in this workspace; narrow the tool request.'
         return output[:1800] + '\n[output truncated]\n' + output[-1200:] + '\n' + reference
 
 

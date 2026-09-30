@@ -2,7 +2,7 @@ from prompt_builder import build_messages, build_edit_system_message, build_user
 from helpers import parse_file_references
 from agent import run_agent_loop
 from mcp_client import MCPClient
-from workspace_tools import WorkspaceTools
+from workspace_tools import WorkspaceTools, MODES
 from runtime import Runtime
 from model_backend import create_model, EmbeddedModel
 from agent import RunBudget
@@ -127,7 +127,10 @@ def _gather_project_context():
     ]
     max_file_chars = 3000
     for fname in key_files:
-        p = Path(fname)
+        try:
+            p = WorkspaceTools().path(fname)
+        except ValueError:
+            continue
         if p.exists() and p.is_file():
             try:
                 content = p.read_text(encoding="utf-8", errors="replace")
@@ -205,6 +208,8 @@ def handle_md_command(console, max_tokens):
 
 
 def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console):
+    if mode not in MODES:
+        raise typer.BadParameter('mode must be read-only, workspace-edit, or execute')
     streamed = False
     def emit(event):
         nonlocal streamed
