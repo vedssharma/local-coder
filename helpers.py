@@ -3,12 +3,16 @@ import re
 import typer
 
 
-def parse_file_references(prompt: str) -> tuple[str, dict[str, str]]:
+def parse_file_references(prompt: str, root=None) -> tuple[str, dict[str, str]]:
     pattern = r'@([^\s]+)'
     matches = re.findall(pattern, prompt)
     file_contents = {}
     for file_path in matches:
-        path = Path(file_path)
+        path = Path(file_path).resolve()
+        workspace = Path(root or Path.cwd()).resolve()
+        if not path.is_relative_to(workspace):
+            typer.echo(f'Warning: File outside workspace: {file_path}', err=True)
+            continue
         if not path.exists():
             typer.echo(f"Warning: File not found: {file_path}", err=True)
             continue

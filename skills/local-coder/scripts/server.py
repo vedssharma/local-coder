@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Move up one more level to the local-coder project root
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, project_root)
-os.chdir(project_root)
+
 
 from mcp.server.fastmcp import FastMCP
 
@@ -70,7 +70,7 @@ def _get_mcp_client(disable: bool = False):
         from workspace_tools import WorkspaceTools
         client = MCPClient()
         client.connect()
-        _mcp_client = WorkspaceTools(mcp_client=client)
+        _mcp_client = WorkspaceTools(mcp_client=client, mode=os.environ.get("LOCAL_CODER_PERMISSION_MODE", "read-only"))
     return _mcp_client
 
 
@@ -108,7 +108,9 @@ def ask(
         for fpath in files:
             if fpath not in file_contents:
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    from workspace_tools import WorkspaceTools
+                    safe_path = WorkspaceTools().path(fpath)
+                    with open(safe_path, "r", encoding="utf-8") as f:
                         file_contents[fpath] = f.read()
                 except Exception as e:
                     file_contents[fpath] = f"[Error reading file: {e}]"
@@ -210,7 +212,9 @@ def edit(
         for fpath in files:
             if fpath not in file_contents:
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    from workspace_tools import WorkspaceTools
+                    safe_path = WorkspaceTools().path(fpath)
+                    with open(safe_path, "r", encoding="utf-8") as f:
                         file_contents[fpath] = f.read()
                 except Exception as e:
                     file_contents[fpath] = f"[Error reading file: {e}]"

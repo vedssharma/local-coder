@@ -14,7 +14,7 @@ def wait(tools, result):
 def test_patch_rejects_stale_and_ambiguous_text(tmp_path):
     p = tmp_path / 'a.py'
     p.write_text('x = 1\nx = 1\n')
-    tools = WorkspaceTools(tmp_path)
+    tools = WorkspaceTools(tmp_path, mode="execute")
     assert tools.call_tool('apply_patch', {'path': 'a.py', 'old_text': 'x = 1', 'new_text': 'x = 2'}).startswith('Error')
     assert p.read_text() == 'x = 1\nx = 1\n'
     assert tools.call_tool('apply_patch', {'path': 'a.py', 'old_text': 'missing', 'new_text': 'x'}).startswith('Error')
@@ -22,7 +22,7 @@ def test_patch_rejects_stale_and_ambiguous_text(tmp_path):
 
 def test_search_patch_and_real_command(tmp_path):
     (tmp_path / 'a.py').write_text('assert 1 == 2\n')
-    tools = WorkspaceTools(tmp_path)
+    tools = WorkspaceTools(tmp_path, mode="execute")
     assert 'a.py:1:' in tools.call_tool('search_code', {'pattern': 'assert'})
     first = wait(tools, json.loads(tools.call_tool('run_command', {'argv': [sys.executable, 'a.py']})))
     assert first['exit_code'] == 1
@@ -34,7 +34,7 @@ def test_search_patch_and_real_command(tmp_path):
 
 
 def test_process_timeout_and_cancel(tmp_path):
-    tools = WorkspaceTools(tmp_path)
+    tools = WorkspaceTools(tmp_path, mode="execute")
     result = wait(tools, json.loads(tools.call_tool('run_command', {
         'argv': [sys.executable, '-c', 'import time; time.sleep(30)'], 'timeout_seconds': 1})))
     assert result['timed_out'] and result['exit_code'] != 0
@@ -42,3 +42,41 @@ def test_process_timeout_and_cancel(tmp_path):
     result = json.loads(tools.call_tool('cancel_process', {'process_id': result['process_id']}))
     assert not result['running']
     tools.close()
+
+
+def test_permission_modes_and_symlink_escape(tmp_path):
+    outside = tmp_path.parent / 'outside.txt'
+    outside.write_text('private')
+    (tmp_path / 'escape').symlink_to(outside)
+    tools = WorkspaceTools(tmp_path)
+    assert tools.call_tool('read_file', {'path': 'escape'}).startswith('Error')
+    assert tools.call_tool('apply_patch', {'path': 'new', 'old_text': '', 'new_text': 'x'}).startswith('Error')
+    assert tools.call_tool('run_command', {'argv': [sys.executable, '-c', 'print(1)']}).startswith('Error')
+    assert not (tmp_path / 'new').exists()
+
+
+def test_undo_preserves_preexisting_and_subsequent_user_changes(tmp_path):
+    p = tmp_path / 'a.py'
+    p.write_text('user original\n')
+    tools = WorkspaceTools(tmp_path, mode='workspace-edit')
+    tools.call_tool('apply_patch', {'path': 'a.py', 'old_text': 'user original', 'new_text': 'agent change'})
+    p.write_text('later user change\n')
+    import pytest
+    with pytest.raises(ValueError, match='preserve your changes'):
+        tools.undo_last()
+    p.write_text('agent change\n')
+    assert 'Undid' in WorkspaceTools(tmp_path, mode='workspace-edit').undo_last()
+    assert p.read_text() == 'user original\n'
+
+
+def test_mcp_cannot_bypass_permissions(tmp_path):
+    from unittest.mock import MagicMock
+    client = MagicMock()
+    client.is_connected = True
+    client.get_openai_tool_schemas.return_value = [
+        {'type': 'function', 'function': {'name': 'write_file'}},
+        {'type': 'function', 'function': {'name': 'read_text_file'}}]
+    tools = WorkspaceTools(tmp_path, mcp_client=client)
+    assert tools.call_tool('write_file', {'path': 'a', 'content': 'bad'}).startswith('Error')
+    assert tools.call_tool('read_text_file', {'path': '../outside'}).startswith('Error')
+    client.call_tool.assert_not_called()

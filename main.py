@@ -2,7 +2,7 @@ from prompt_builder import build_messages, build_edit_system_message, build_user
 from helpers import parse_file_references
 from agent import run_agent_loop
 from mcp_client import MCPClient
-from workspace_tools import WorkspaceTools
+from workspace_tools import WorkspaceTools, MODES
 from session import SessionStore, ContextManager
 import config
 import os
@@ -207,14 +207,15 @@ def handle_md_command(console, max_tokens):
 def ask(
     prompt: str = typer.Argument(..., help="Coding question"),
     max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate"),
-    no_mcp: bool = typer.Option(False, "--no-mcp", help="Disable MCP filesystem server")
+    no_mcp: bool = typer.Option(False, "--no-mcp", help="Disable MCP filesystem server"),
+    mode: str = typer.Option("read-only", "--mode", help="read-only, workspace-edit, or execute")
 ):
     """Ask a coding question with optional file references using @file syntax"""
     console = Console()
     original_prompt, file_contents = parse_file_references(prompt)
     messages = build_messages(original_prompt, file_contents)
 
-    mcp = WorkspaceTools(mcp_client=None if no_mcp else get_mcp_client())
+    mcp = WorkspaceTools(mcp_client=None if no_mcp else get_mcp_client(), mode=mode)
     final_answer = run_agent_loop(
         llm=get_llm(),
         messages=messages,
@@ -232,13 +233,14 @@ def ask(
 def chat(
     max_tokens: int = typer.Option(512, "--max-tokens", "-n", help="Max number of new tokens to generate"),
     no_mcp: bool = typer.Option(False, "--no-mcp", help="Disable MCP filesystem server"),
+    mode: str = typer.Option("read-only", "--mode", help="read-only, workspace-edit, or execute"),
     resume: str = typer.Option(None, "--resume", help="Resume a saved session ID")
 ):
     """Start an interactive chat session. Type /exit to quit."""
     console = Console()
     typer.echo("Starting interactive chat session. Type /exit to quit.\n")
 
-    mcp = WorkspaceTools(mcp_client=None if no_mcp else get_mcp_client())
+    mcp = WorkspaceTools(mcp_client=None if no_mcp else get_mcp_client(), mode=mode)
     store = SessionStore(config.CONFIG_DIR / 'sessions', os.getcwd())
     history = store.load(resume) if resume else []
     session_id = resume
@@ -254,6 +256,12 @@ def chat(
                     typer.echo("Goodbye!")
                     break
 
+                if prompt.strip() == '/undo':
+                    try:
+                        typer.echo(mcp.undo_last())
+                    except (OSError, ValueError) as exc:
+                        typer.echo(f'Cannot undo: {exc}')
+                    continue
                 if prompt.startswith('/resume '):
                     candidate = prompt.split(maxsplit=1)[1].strip()
                     try:
@@ -313,6 +321,7 @@ def chat(
 def edit(
     prompt: str = typer.Argument(..., help="Edit request (use @file syntax to reference files)"),
     max_tokens: int = typer.Option(2048, "--max-tokens", "-n", help="Max number of tokens"),
+    mode: str = typer.Option("workspace-edit", "--mode", help="workspace-edit or execute"),
 ):
     """Request code changes. Reference files with @file syntax."""
     console = Console()
@@ -321,7 +330,7 @@ def edit(
     messages = [build_edit_system_message()]
     messages.append(build_user_message(original_prompt, file_contents))
 
-    mcp = WorkspaceTools(mcp_client=get_mcp_client())
+    mcp = WorkspaceTools(mcp_client=get_mcp_client(), mode=mode)
     typer.echo("Generating changes...\n")
     final_answer = run_agent_loop(
         llm=get_llm(),
@@ -334,6 +343,16 @@ def edit(
     if final_answer:
         console.print(Markdown(final_answer))
         console.print()
+
+@app.command()
+def undo():
+    """Undo the most recent harness patch if the file has not changed since."""
+    try:
+        typer.echo(WorkspaceTools(mode='workspace-edit').undo_last())
+    except (OSError, ValueError) as exc:
+        typer.echo(f'Cannot undo: {exc}', err=True)
+        raise typer.Exit(1)
+
 
 @app.command()
 def models(

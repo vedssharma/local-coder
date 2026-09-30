@@ -35,9 +35,18 @@ SCHEMAS = [
 ]
 
 
+MODES = ('read-only', 'workspace-edit', 'execute')
+READ_TOOLS = {'read_file', 'list_directory', 'search_code', 'git_diff'}
+MCP_READ_TOOLS = {'read_text_file', 'read_multiple_files', 'directory_tree', 'get_file_info',
+                  'list_allowed_directories', 'search_files', 'list_directory_with_sizes'}
+
+
 class WorkspaceTools:
-    def __init__(self, root=None, mcp_client=None):
+    def __init__(self, root=None, mcp_client=None, mode="read-only"):
         self.root = Path(root or os.getcwd()).resolve()
+        if mode not in MODES:
+            raise ValueError('Unknown permission mode')
+        self.mode = mode
         self.mcp_client = mcp_client
         self.processes = {}
         self.is_connected = True
@@ -48,6 +57,19 @@ class WorkspaceTools:
             raise ValueError('Path is outside the workspace')
         return p
 
+    def authorize(self, name, args):
+        if name not in self.tool_names:
+            raise PermissionError(f'Tool {name} is unavailable in {self.mode} mode')
+        for key in ('path', 'cwd'):
+            if key in args:
+                self.path(args[key])
+        for value in args.get('paths', []):
+            self.path(value)
+        if name == 'apply_patch':
+            relative = self.path(args['path']).relative_to(self.root)
+            if any(part in ('.git', '.local-coder') for part in relative.parts):
+                raise PermissionError('Harness metadata and Git internals cannot be edited')
+
     @property
     def tool_names(self):
         return {s['function']['name'] for s in self.get_openai_tool_schemas()}
@@ -57,11 +79,15 @@ class WorkspaceTools:
         if self.mcp_client and self.mcp_client.is_connected:
             names = {s['function']['name'] for s in SCHEMAS}
             extra = [s for s in self.mcp_client.get_openai_tool_schemas()
-                     if s['function']['name'] not in names]
-        return SCHEMAS + extra
+                     if s['function']['name'] not in names and s['function']['name'] in MCP_READ_TOOLS]
+        allowed = READ_TOOLS | ({'apply_patch'} if self.mode != 'read-only' else set())
+        if self.mode == 'execute':
+            allowed |= {'run_command', 'poll_process', 'cancel_process'}
+        return [s for s in SCHEMAS if s['function']['name'] in allowed] + extra
 
     def call_tool(self, name, args):
         try:
+            self.authorize(name, args)
             if name == 'read_file':
                 p = self.path(args['path'])
                 start, end = args.get('start_line', 1), args.get('end_line', 200)
@@ -93,9 +119,12 @@ class WorkspaceTools:
             if name == 'apply_patch':
                 p = self.path(args['path'])
                 old, new = args['old_text'], args['new_text']
+                before = p.read_text() if p.exists() else None
+                mode = p.stat().st_mode if p.exists() else 0o644
                 if not old:
                     with p.open('x') as f:
                         f.write(new)
+                    updated = new
                 else:
                     original = p.read_text()
                     if original.count(old) != 1:
@@ -112,6 +141,7 @@ class WorkspaceTools:
                         temp.replace(p)
                     finally:
                         temp.unlink(missing_ok=True)
+                self._record_patch(p, before, updated, mode)
                 return f'Patched {p.relative_to(self.root)}'
             if name == 'run_command':
                 return json.dumps(self._start(args['argv'], self.path(args.get('cwd', '.')),
@@ -122,12 +152,51 @@ class WorkspaceTools:
                     self._kill(state)
                 return json.dumps(self._poll(args['process_id']))
             if name == 'git_diff':
-                return json.dumps(self._capture(['git', 'diff', 'HEAD', '--']))
+                return json.dumps(self._capture(['git', '--no-pager', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--']))
             if self.mcp_client and self.mcp_client.is_connected:
                 return self.mcp_client.call_tool(name, args)
             raise ValueError(f'Unknown tool: {name}')
         except (OSError, ValueError, KeyError, TypeError) as exc:
             return f'Error: {exc}'
+
+    def _record_patch(self, path, before, after, mode):
+        directory = self.path('.local-coder/undo')
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        record = {'path': str(path.relative_to(self.root)), 'before': before, 'after': after, 'mode': mode}
+        key = f'{time.time_ns()}-{uuid.uuid4().hex}.json'
+        with (directory / key).open('x') as f:
+            os.chmod(f.name, 0o600)
+            json.dump(record, f)
+
+    def undo_last(self):
+        if self.mode == 'read-only':
+            raise PermissionError('Undo requires workspace-edit or execute mode')
+        records = sorted(self.path('.local-coder/undo').glob('*.json'))
+        if not records:
+            return 'No harness edits to undo.'
+        record_path = records[-1]
+        if record_path.is_symlink():
+            raise ValueError('Invalid undo record')
+        record = json.loads(record_path.read_text())
+        self.authorize('apply_patch', {'path': record['path']})
+        path = self.path(record['path'])
+        if not path.exists() or path.read_text() != record['after']:
+            raise ValueError('File changed since the harness edit; undo refused to preserve your changes')
+        if record['before'] is None:
+            path.unlink()
+        else:
+            with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as f:
+                temp = Path(f.name)
+                f.write(record['before'])
+            try:
+                temp.chmod(record['mode'])
+                if path.read_text() != record['after']:
+                    raise ValueError('File changed during undo')
+                temp.replace(path)
+            finally:
+                temp.unlink(missing_ok=True)
+        record_path.unlink()
+        return f'Undid harness edit to {record["path"]}'
 
     def _start(self, argv, cwd, timeout):
         if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
@@ -141,7 +210,7 @@ class WorkspaceTools:
                  'timed_out': False, 'lock': threading.Lock()}
         self.processes[key] = state
         def drain():
-            while chunk := proc.stdout.read(4096):
+            while chunk := proc.stdout.read1(4096):
                 with state['lock']:
                     state['output'] = (state['output'] + chunk)[-32000:]
             proc.stdout.close()
