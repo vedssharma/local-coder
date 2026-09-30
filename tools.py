@@ -92,8 +92,25 @@ TOOL_SCHEMAS = [
 ]
 
 
-def execute_tool(name, arguments, confirm_fn=None):
+def execute_tool(name, arguments, confirm_fn=None, root=None, mode="read-only"):
     """Dispatch to the appropriate tool function. Returns result as a string."""
+    # Legacy API retained for callers; all public dispatch still enforces scope.
+    from workspace_tools import WorkspaceTools
+    executor = WorkspaceTools(root=root, mode=mode)
+    try:
+        if name in ('read_file', 'list_directory', 'search_files', 'write_file'):
+            executor.path(arguments.get('path', '.'))
+        if name == 'write_file':
+            if mode == 'read-only':
+                return 'Error: write_file requires workspace-edit or execute mode'
+            path = executor.path(arguments.get('path', ''))
+            content = arguments.get('content', '')
+            if confirm_fn and not confirm_fn(str(path), content):
+                return 'Write cancelled by user.'
+            old = path.read_text() if path.exists() else ''
+            return executor.call_tool('apply_patch', {'path': str(path), 'old_text': old, 'new_text': content})
+    except (OSError, ValueError) as exc:
+        return f'Error: {exc}'
     if name == "read_file":
         return _read_file(arguments.get("path", ""))
     elif name == "list_directory":

@@ -45,3 +45,5 @@ llm/
 # Project specific
 /CLAUDE.md
 /CONTEXT.md
+# Local harness artifacts
+.local-coder/

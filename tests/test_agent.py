@@ -254,7 +254,7 @@ class TestRunAgentLoop:
         ]
         messages = [{"role": "user", "content": "q"}]
         result = agent.run_agent_loop(
-            mock_llm, messages, mock_console, max_tokens=64, mcp_client=mock_mcp_client
+            mock_llm, messages, mock_console, max_tokens=64, mcp_client=mock_mcp_client, inline_tool_calls=True
         )
         assert result == "Done via inline."
         mock_mcp_client.call_tool.assert_called_once()
@@ -282,8 +282,8 @@ class TestRunAgentLoop:
         result = agent.run_agent_loop(
             llm, messages, mock_console, max_tokens=64, mcp_client=client
         )
-        assert result == "Forced final answer."
-        assert llm.create_chat_completion.call_count == agent.MAX_AGENT_ITERATIONS + 1
+        assert "budget exhausted" in result.lower()
+        assert llm.create_chat_completion.call_count == agent.MAX_AGENT_ITERATIONS
 
     def test_nudge_sent_on_empty_response(self, mock_llm, mock_console):
         """Empty content + no tool calls causes a nudge message to be appended."""
@@ -336,3 +336,33 @@ class TestRunAgentLoop:
         )
         assert result == "Done."
         mock_mcp_client.call_tool.assert_called_once_with("read_file", {"path": "x.py"})
+
+
+def test_json_example_is_never_executed_by_default(mock_llm, mock_mcp_client):
+    text = '```json\n{"name":"read_file","arguments":{"path":"x"}}\n```'
+    mock_llm.create_chat_completion.return_value = _make_text_response(text)
+    result = agent.run_agent(mock_llm, [], mcp_client=mock_mcp_client)
+    assert result.status == 'completed' and result.text == text
+    mock_mcp_client.call_tool.assert_not_called()
+
+
+def test_invalid_call_recovery_and_repeated_failure(mock_llm, mock_mcp_client):
+    bad = _make_tool_call_response('read_file', {})
+    bad['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = '{broken'
+    mock_llm.create_chat_completion.side_effect = [bad, bad, bad]
+    result = agent.run_agent(mock_llm, [], mcp_client=mock_mcp_client)
+    assert result.status == 'blocked' and result.reason == 'repeated_tool_failure'
+    mock_mcp_client.call_tool.assert_not_called()
+
+
+def test_cancelled_and_truncated_calls_do_not_execute(mock_llm, mock_mcp_client):
+    import threading
+    cancel = threading.Event()
+    cancel.set()
+    assert agent.run_agent(mock_llm, [], cancel_event=cancel).status == 'cancelled'
+    mock_llm.create_chat_completion.assert_not_called()
+    response = _make_tool_call_response('read_file', {'path': 'x'})
+    response['choices'][0]['finish_reason'] = 'length'
+    mock_llm.create_chat_completion.return_value = response
+    assert agent.run_agent(mock_llm, [], mcp_client=mock_mcp_client).status == 'budget_exhausted'
+    mock_mcp_client.call_tool.assert_not_called()

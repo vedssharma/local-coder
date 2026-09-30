@@ -1,4 +1,5 @@
 typer
 llama-cpp-python
 rich
-mcp
+mcp>=1.30,<2
+jsonschema

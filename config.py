@@ -3,10 +3,13 @@ import os
 from pathlib import Path
 from typing import Optional
 
-CONFIG_DIR = Path.home() / ".local-coder"
+CONFIG_DIR = Path(os.environ.get("LOCAL_CODER_CONFIG_DIR", Path.home() / ".local-coder"))
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
+    "backend": "embedded",
+    "supports_tools": True,
+    "stream": True,
     "model_path": "./Qwen_Qwen2.5-Coder-7B-Instruct-GGUF_qwen2.5-coder-7b-instruct-q4_k_m.gguf",
     "n_ctx": 8192,
     "n_gpu_layers": -1

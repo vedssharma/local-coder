@@ -224,3 +224,39 @@ class TestClose:
         assert not client.is_connected
         assert client._session is None
         assert client._exit_stack is None
+
+
+def test_resource_scopes_close_on_their_owning_task(monkeypatch, tmp_path):
+    from contextlib import asynccontextmanager
+    import mcp_client
+    tasks = []
+    @asynccontextmanager
+    async def transport(_):
+        owner = asyncio.current_task()
+        tasks.append('entered')
+        try:
+            yield (None, None)
+        finally:
+            assert asyncio.current_task() is owner
+            tasks.append('closed')
+    class Session:
+        def __init__(self, *_):
+            pass
+        async def __aenter__(self):
+            self.owner = asyncio.current_task()
+            return self
+        async def __aexit__(self, *_):
+            assert asyncio.current_task() is self.owner
+        async def initialize(self):
+            pass
+        async def list_tools(self):
+            result = MagicMock()
+            result.tools = []
+            return result
+    monkeypatch.setattr(mcp_client, 'stdio_client', transport)
+    monkeypatch.setattr(mcp_client, 'ClientSession', Session)
+    client = MCPClient(tmp_path)
+    client.connect()
+    assert client.is_connected
+    client.close()
+    assert tasks == ['entered', 'closed']

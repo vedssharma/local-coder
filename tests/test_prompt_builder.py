@@ -76,7 +76,7 @@ class TestBuildSystemMessage:
         content = msg["content"]
         assert "read_file" in content
         assert "list_directory" in content
-        assert "search_files" in content
+        assert "search_code" in content
 
     def test_injects_context_md_when_present(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -104,7 +104,7 @@ class TestBuildEditSystemMessage:
         msg = prompt_builder.build_edit_system_message()
         content = msg["content"]
         assert "read_file" in content
-        assert "write_file" in content
+        assert "apply_patch" in content
 
     def test_no_tool_injection(self):
         # Edit system message should NOT contain context from CONTEXT.md

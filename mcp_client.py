@@ -34,76 +34,73 @@ class MCPClient:
         self._connected = False
         self._loop = None
         self._thread = None
+        self._ready = threading.Event()
+        self._stop = None
+        self._future = None
+        self._connect_error = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def connect(self):
-        """Start the MCP server subprocess and discover tools."""
+        """Start a lifecycle task that owns both entry and exit of MCP scopes."""
+        if self._connected:
+            return
+        self._ready.clear()
+        self._connect_error = None
         try:
-            # Create a new event loop in a background thread
             self._loop = asyncio.new_event_loop()
             self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
             self._thread.start()
-
-            # Run the async connect on the background loop
-            future = asyncio.run_coroutine_threadsafe(self._connect_async(), self._loop)
-            future.result(timeout=30)  # Wait up to 30s for server to start
-        except Exception as e:
-            print(f"[MCP] Failed to connect: {e}")
-            self._connected = False
+            self._future = asyncio.run_coroutine_threadsafe(self._connect_async(), self._loop)
+            if not self._ready.wait(timeout=30):
+                raise TimeoutError('MCP initialization timed out')
+            if self._connect_error:
+                raise self._connect_error
+        except Exception as exc:
+            print(f'[MCP] Failed to connect: {exc}')
+            self.close()
 
     async def _connect_async(self):
-        server_params = StdioServerParameters(
-            command="npx",
-            args=[
-                "-y",
-                "@modelcontextprotocol/server-filesystem",
-                self.allowed_dir,
-            ],
-        )
-
-        self._exit_stack = AsyncExitStack()
-        await self._exit_stack.__aenter__()
-
-        stdio_transport = await self._exit_stack.enter_async_context(
-            stdio_client(server_params)
-        )
-        read_stream, write_stream = stdio_transport
-        self._session = await self._exit_stack.enter_async_context(
-            ClientSession(read_stream, write_stream)
-        )
-
-        await self._session.initialize()
-
-        # Discover tools
-        tools_result = await self._session.list_tools()
-        self._tools = tools_result.tools
-        self._tool_names = {t.name for t in self._tools}
-        self._connected = True
-        print(f"[MCP] Discovered tools: {', '.join(sorted(self._tool_names))}")
+        params = StdioServerParameters(command='npx', args=[
+            '-y', '@modelcontextprotocol/server-filesystem', self.allowed_dir])
+        self._stop = asyncio.Event()
+        try:
+            async with AsyncExitStack() as stack:
+                self._exit_stack = stack
+                read, write = await stack.enter_async_context(stdio_client(params))
+                self._session = await stack.enter_async_context(ClientSession(read, write))
+                await self._session.initialize()
+                tools = await self._session.list_tools()
+                self._tools = tools.tools
+                self._tool_names = {tool.name for tool in self._tools}
+                self._connected = True
+                self._ready.set()
+                await self._stop.wait()
+        except Exception as exc:
+            self._connect_error = exc
+        finally:
+            self._connected = False
+            self._ready.set()
 
     def close(self):
-        """Shut down the MCP server subprocess."""
-        if self._loop and self._exit_stack:
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    self._exit_stack.__aexit__(None, None, None), self._loop
-                )
-                future.result(timeout=5)
-            except Exception:
-                pass
-
+        """Close MCP resources on their owning task before stopping its loop."""
         if self._loop:
+            if self._stop:
+                self._loop.call_soon_threadsafe(self._stop.set)
+            if self._future:
+                try:
+                    self._future.result(timeout=5)
+                except Exception:
+                    self._future.cancel()
             self._loop.call_soon_threadsafe(self._loop.stop)
             if self._thread:
                 self._thread.join(timeout=5)
-            self._loop = None
-            self._thread = None
-
-        self._exit_stack = None
-        self._session = None
+            if not self._loop.is_running():
+                self._loop.close()
+        self._loop = self._thread = self._future = self._stop = None
+        self._exit_stack = self._session = None
         self._connected = False
 
     # ------------------------------------------------------------------
@@ -168,7 +165,7 @@ class MCPClient:
     async def _call_tool_async(self, name, arguments):
         result = await self._session.call_tool(name, arguments)
 
-        if result.isError:
+        if getattr(result, "isError", False):
             # Extract error message from content blocks
             error_parts = []
             for block in result.content:

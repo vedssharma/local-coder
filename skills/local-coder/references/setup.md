@@ -1,76 +1,26 @@
-# local-coder MCP Server — Agent Setup Guide
+# MCP setup
 
-## Prerequisites
+Install Local Coder's Python requirements and ripgrep. Configure a GGUF model or an OpenAI-compatible local server using `python main.py models`. Node is not required for the native coding tools.
 
-- local-coder project cloned with its virtualenv set up (`pip install -r requirements.txt`)
-- A GGUF model file configured (check `~/.local-coder/config.json` or run `python main.py models`)
-- Node.js installed (required for the MCP filesystem sub-server used by `edit`)
-
-## Configuring in Claude Code
-
-Add to `~/.claude/settings.json` (or the project-level `.claude/settings.json`):
+Use your host's supported stdio MCP configuration format. The essential fields are:
 
 ```json
 {
   "mcpServers": {
     "local-coder": {
       "command": "/absolute/path/to/local-coder/llm/bin/python",
-      "args": ["/absolute/path/to/local-coder/local-coder/scripts/server.py"],
-      "cwd": "/absolute/path/to/local-coder"
+      "args": ["/absolute/path/to/local-coder/skills/local-coder/scripts/server.py"],
+      "cwd": "/absolute/path/to/the/project-to-work-on",
+      "env": {
+        "LOCAL_CODER_PERMISSION_MODE": "read-only"
+      }
     }
   }
 }
 ```
 
-Then restart Claude Code. The tools `ask`, `chat`, `edit`, `get_model`, and `set_model`
-will appear in the available tools list.
+Launch from the project to work on; the server resolves its own Python imports separately. `LOCAL_CODER_CONFIG_DIR` can select a configuration/session directory. Permission mode defaults to `read-only`; use `workspace-edit` for patches or `execute` for commands. Command execution uses host privileges, not an OS sandbox. Use environment variables for API authentication and never embed key values in source or shared settings.
 
-## Configuring in Cursor
+`ask`, `chat`, and `edit` return structured results including `status`, `text`, and `session_id`. Continue with `chat(message="...", session_id="...")`. Sessions persist across server restarts and preserve tool observations. `edit` and `set_model` are blocked in read-only mode. `set_model(path="...")` accepts a workspace-local GGUF.
 
-Add to `.cursor/mcp.json` in your workspace (or `~/.cursor/mcp.json` globally):
-
-```json
-{
-  "mcpServers": {
-    "local-coder": {
-      "command": "/absolute/path/to/local-coder/llm/bin/python",
-      "args": ["/absolute/path/to/local-coder/local-coder/scripts/server.py"],
-      "cwd": "/absolute/path/to/local-coder"
-    }
-  }
-}
-```
-
-## Configuring in any MCP-compatible agent
-
-The server uses stdio transport. Point the agent to:
-
-```
-command:  /path/to/local-coder/llm/bin/python
-args:     ["/path/to/local-coder/local-coder/scripts/server.py"]
-cwd:      /path/to/local-coder   (required — modules are resolved relative to cwd)
-```
-
-## Finding your local-coder path
-
-```bash
-# If cloned to ~/projects/local-coder:
-realpath ~/projects/local-coder
-```
-
-## Testing the server manually
-
-```bash
-cd /path/to/local-coder
-./llm/bin/python local-coder/scripts/server.py
-# Server waits for MCP JSON-RPC on stdin; Ctrl-C to stop
-```
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| `ModuleNotFoundError: llama_cpp` | Run server with the local-coder virtualenv python (`llm/bin/python`) |
-| `Model file not found` | Run `python main.py models` and confirm the path in `~/.local-coder/config.json` |
-| `MCP filesystem unavailable` | Install Node.js; the edit tool uses `@modelcontextprotocol/server-filesystem` |
-| Slow first response | Normal — the GGUF model loads on first use and stays resident |
+To smoke-test transport, connect an MCP client, initialize the session, list tools, and call `get_model`. This tests discovery/configuration, not model inference. Running the script directly waits for MCP JSON-RPC on stdin.

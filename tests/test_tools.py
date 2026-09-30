@@ -43,24 +43,24 @@ class TestExecuteTool:
     def test_dispatches_read_file(self, tmp_path):
         f = tmp_path / "hello.txt"
         f.write_text("hi")
-        result = tools.execute_tool("read_file", {"path": str(f)})
+        result = tools.execute_tool("read_file", {"path": str(f)}, root=tmp_path)
         assert result == "hi"
 
     def test_dispatches_list_directory(self, tmp_path):
         (tmp_path / "sub").mkdir()
-        result = tools.execute_tool("list_directory", {"path": str(tmp_path)})
+        result = tools.execute_tool("list_directory", {"path": str(tmp_path)}, root=tmp_path)
         assert "sub/" in result
 
     def test_dispatches_search_files(self, tmp_path):
         f = tmp_path / "code.py"
         f.write_text("def hello(): pass")
-        result = tools.execute_tool("search_files", {"pattern": "hello", "path": str(tmp_path)})
+        result = tools.execute_tool("search_files", {"pattern": "hello", "path": str(tmp_path)}, root=tmp_path)
         assert "hello" in result
 
     def test_dispatches_write_file(self, tmp_path):
         dest = tmp_path / "out.txt"
-        result = tools.execute_tool("write_file", {"path": str(dest), "content": "written"})
-        assert "Successfully wrote" in result
+        result = tools.execute_tool("write_file", {"path": str(dest), "content": "written"}, root=tmp_path, mode="workspace-edit")
+        assert "Patched" in result
         assert dest.read_text() == "written"
 
     def test_returns_error_for_unknown_tool(self):

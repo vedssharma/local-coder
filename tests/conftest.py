@@ -71,7 +71,10 @@ def mock_mcp_client():
     """Return a mock MCPClient that is connected and exposes no tools."""
     client = MagicMock()
     client.is_connected = True
-    client.get_openai_tool_schemas.return_value = []
+    client.get_openai_tool_schemas.return_value = [
+        {"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}
+        for name in ("read_file", "list_directory")
+    ]
     client.call_tool.return_value = "tool result"
     return client
 

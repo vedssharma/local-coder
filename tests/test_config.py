@@ -44,7 +44,7 @@ class TestLoadConfig:
         config_dir.mkdir(parents=True, exist_ok=True)
         cfg.CONFIG_FILE.write_text(json.dumps(custom))
         result = cfg.load_config()
-        assert result == custom
+        assert result == {**cfg.DEFAULT_CONFIG, **custom}
 
     def test_backfills_missing_default_keys(self, config_dir):
         partial = {"model_path": "/partial/model.gguf"}

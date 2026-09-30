@@ -29,3 +29,5 @@ CLAUDE.md
 
 # Other
 *.log
+
+.local-coder/
