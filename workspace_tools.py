@@ -11,6 +11,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 import web_tools
+from tool_result import ToolResult, invoke_tool
 
 
 def schema(name, description, properties, required=()):
@@ -128,109 +129,128 @@ class WorkspaceTools:
         return schemas
 
     def call_tool(self, name, args):
+        return self.execute_tool(name, args).to_legacy()
+
+    def execute_tool(self, name, args):
+        started = time.monotonic()
         try:
             self.authorize(name, args)
-            if name == 'web_search':
-                return json.dumps(web_tools.search(**args))
-            if name == 'web_fetch':
-                return json.dumps(web_tools.fetch(**args))
-            if name in ('batch_read', 'batch_search'):
-                requests = args['requests']
-                if not isinstance(requests, list) or not 1 <= len(requests) <= 8:
-                    raise ValueError('A batch must contain 1 to 8 requests')
-                child = 'read_file' if name == 'batch_read' else 'search_code'
-                # Only pure reads/searches are parallelized. Duplicate entries share
-                # one execution; each request still gets its ordered result.
-                unique = {json.dumps(a, sort_keys=True): a for a in requests}
-                with ThreadPoolExecutor(max_workers=min(4, len(unique))) as pool:
-                    futures = {key: pool.submit(self.call_tool, child, value) for key, value in unique.items()}
-                    results = {key: future.result() for key, future in futures.items()}
-                return json.dumps([{'request': value, 'output': results[json.dumps(value, sort_keys=True)]}
-                                   for value in requests])
-            if name == 'read_file':
-                p = self.path(args['path'])
-                start, end = args.get('start_line', 1), args.get('end_line', args.get('start_line', 1) + 99)
-                if start < 1 or end < start or end - start > 1000:
-                    raise ValueError('Use a range of at most 1001 lines')
-                lines = []
-                with p.open() as f:
-                    for n, line in enumerate(f, 1):
-                        if n > end:
-                            break
-                        if n >= start:
-                            lines.append(f'{n}: {line}')
-                from session import repository_instructions
-                instructions = repository_instructions(self.root, p, include_root=False)
-                result = ''.join(lines)[:32000] or '(empty file)'
-                return result + ('\n\n' + instructions if instructions else '')
-            if name == 'list_directory':
-                return '\n'.join(p.name + ('/' if p.is_dir() else '')
-                                 for p in sorted(self.path(args.get('path', '.')).iterdir())[:200])
-            if name == 'search_code':
-                command = ['rg', '-n', '--no-heading', '--color=never', '--max-count=50']
-                if args.get('glob'):
-                    command += ['--glob', args['glob']]
-                command += ['--', args['pattern'], str(self.path(args.get('path', '.')))]
-                result = self._capture(command)
-                if result['exit_code'] == 1:
-                    return 'No matches found.'
-                return json.dumps(result)
-            if name == 'apply_patch':
-                p = self.path(args['path'])
-                old, new = args['old_text'], args['new_text']
-                before = p.read_text() if p.exists() else None
-                mode = p.stat().st_mode if p.exists() else 0o644
-                if not old:
-                    with p.open('x') as f:
-                        f.write(new)
-                    updated = new
-                else:
-                    original = p.read_text()
-                    before = original
-                    if original.count(old) != 1:
-                        raise ValueError('Expected text must match exactly once; reread the file')
-                    updated = original.replace(old, new, 1)
-                    # Atomic replacement, keeping executable mode.
-                    with tempfile.NamedTemporaryFile(mode='w', dir=p.parent, delete=False) as f:
-                        temp = Path(f.name)
-                        f.write(updated)
-                    try:
-                        temp.chmod(p.stat().st_mode)
-                        if p.read_text() != original:
-                            raise ValueError('File changed during patch; reread it')
-                        temp.replace(p)
-                    finally:
-                        temp.unlink(missing_ok=True)
-                self._record_patch(p, before, updated, mode)
-                return f'Patched {p.relative_to(self.root)}'
-            if name == 'run_command':
-                return json.dumps(self._start(args['argv'], self.path(args.get('cwd', '.')),
-                                              args.get('timeout_seconds', 60)))
-            if name == 'bash':
-                command = args['command']
-                if not isinstance(command, str) or not command.strip():
-                    raise ValueError('command must be a nonempty string')
-                executable = shutil.which('bash')
-                if not executable:
-                    raise ValueError('Bash is not installed or is unavailable on PATH')
-                return json.dumps(self._start([executable, '--noprofile', '--norc', '-c', command],
-                                              self.path(args.get('cwd', '.')),
-                                              args.get('timeout_seconds', 60)))
-            if name in ('poll_process', 'cancel_process'):
-                state = self.processes[args['process_id']]
-                if name == 'cancel_process':
-                    self._kill(state)
-                return json.dumps(self._poll(args['process_id']))
-            if name == 'git_diff':
-                result = self._capture(['git', '--no-pager', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--'])
-                untracked = self._capture(['git', '-c', 'core.fsmonitor=false', 'ls-files', '--others', '--exclude-standard', '--exclude=.local-coder/', '-z'])
-                result['untracked_files'] = [p for p in untracked['output'].split('\0') if p]
-                return json.dumps(result)
-            if self.mcp_client and self.mcp_client.is_connected:
-                return self.mcp_client.call_tool(name, args)
-            raise ValueError(f'Unknown tool: {name}')
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            return f'Error: {exc}'
+            data = self._dispatch(name, args)
+            result = data if isinstance(data, ToolResult) else ToolResult(data=data)
+        except PermissionError as exc:
+            result = ToolResult.error('permission_denied', exc)
+        except FileNotFoundError as exc:
+            result = ToolResult.error('not_found', exc)
+        except (ValueError, KeyError, TypeError) as exc:
+            result = ToolResult.error('invalid_request', exc)
+        except TimeoutError as exc:
+            result = ToolResult.error('tool_timeout', exc, retryable=True)
+        except OSError as exc:
+            result = ToolResult.error('io_error', exc)
+        result.duration_seconds = time.monotonic() - started
+        return result
+
+    def _dispatch(self, name, args):
+        if name == 'web_search':
+            return web_tools.search(**args)
+        if name == 'web_fetch':
+            return web_tools.fetch(**args)
+        if name in ('batch_read', 'batch_search'):
+            requests = args['requests']
+            if not isinstance(requests, list) or not 1 <= len(requests) <= 8:
+                raise ValueError('A batch must contain 1 to 8 requests')
+            child = 'read_file' if name == 'batch_read' else 'search_code'
+            # Only pure reads/searches are parallelized. Duplicate entries share
+            # one execution; each request still gets its ordered result.
+            unique = {json.dumps(a, sort_keys=True): a for a in requests}
+            with ThreadPoolExecutor(max_workers=min(4, len(unique))) as pool:
+                futures = {key: pool.submit(self.execute_tool, child, value) for key, value in unique.items()}
+                results = {key: future.result() for key, future in futures.items()}
+            return [{'request': value, 'result': results[json.dumps(value, sort_keys=True)].to_dict(),
+                     'output': results[json.dumps(value, sort_keys=True)].to_legacy()} for value in requests]
+        if name == 'read_file':
+            p = self.path(args['path'])
+            start, end = args.get('start_line', 1), args.get('end_line', args.get('start_line', 1) + 99)
+            if start < 1 or end < start or end - start > 1000:
+                raise ValueError('Use a range of at most 1001 lines')
+            lines = []
+            with p.open() as f:
+                for n, line in enumerate(f, 1):
+                    if n > end:
+                        break
+                    if n >= start:
+                        lines.append(f'{n}: {line}')
+            from session import repository_instructions
+            instructions = repository_instructions(self.root, p, include_root=False)
+            result = ''.join(lines)[:32000] or '(empty file)'
+            return result + ('\n\n' + instructions if instructions else '')
+        if name == 'list_directory':
+            return '\n'.join(p.name + ('/' if p.is_dir() else '')
+                             for p in sorted(self.path(args.get('path', '.')).iterdir())[:200])
+        if name == 'search_code':
+            command = ['rg', '-n', '--no-heading', '--color=never', '--max-count=50']
+            if args.get('glob'):
+                command += ['--glob', args['glob']]
+            command += ['--', args['pattern'], str(self.path(args.get('path', '.')))]
+            result = self._capture(command)
+            if result['exit_code'] == 1:
+                return 'No matches found.'
+            return ToolResult.process(result)
+        if name == 'apply_patch':
+            p = self.path(args['path'])
+            old, new = args['old_text'], args['new_text']
+            before = p.read_text() if p.exists() else None
+            mode = p.stat().st_mode if p.exists() else 0o644
+            if not old:
+                with p.open('x') as f:
+                    f.write(new)
+                updated = new
+            else:
+                original = p.read_text()
+                before = original
+                if original.count(old) != 1:
+                    raise ValueError('Expected text must match exactly once; reread the file')
+                updated = original.replace(old, new, 1)
+                # Atomic replacement, keeping executable mode.
+                with tempfile.NamedTemporaryFile(mode='w', dir=p.parent, delete=False) as f:
+                    temp = Path(f.name)
+                    f.write(updated)
+                try:
+                    temp.chmod(p.stat().st_mode)
+                    if p.read_text() != original:
+                        raise ValueError('File changed during patch; reread it')
+                    temp.replace(p)
+                finally:
+                    temp.unlink(missing_ok=True)
+            self._record_patch(p, before, updated, mode)
+            return f'Patched {p.relative_to(self.root)}'
+        if name == 'run_command':
+            return ToolResult.process(self._start(args['argv'], self.path(args.get('cwd', '.')),
+                                                 args.get('timeout_seconds', 60)))
+        if name == 'bash':
+            command = args['command']
+            if not isinstance(command, str) or not command.strip():
+                raise ValueError('command must be a nonempty string')
+            executable = shutil.which('bash')
+            if not executable:
+                raise ValueError('Bash is not installed or is unavailable on PATH')
+            return ToolResult.process(self._start([executable, '--noprofile', '--norc', '-c', command],
+                                                 self.path(args.get('cwd', '.')),
+                                                 args.get('timeout_seconds', 60)))
+        if name in ('poll_process', 'cancel_process'):
+            state = self.processes[args['process_id']]
+            if name == 'cancel_process':
+                state['cancelled'] = True
+                self._kill(state)
+            return ToolResult.process(self._poll(args['process_id']))
+        if name == 'git_diff':
+            result = self._capture(['git', '--no-pager', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--'])
+            untracked = self._capture(['git', '-c', 'core.fsmonitor=false', 'ls-files', '--others', '--exclude-standard', '--exclude=.local-coder/', '-z'])
+            result['untracked_files'] = [p for p in untracked['output'].split('\0') if p]
+            return ToolResult.process(result)
+        if self.mcp_client and self.mcp_client.is_connected:
+            return invoke_tool(self.mcp_client, name, args)
+        raise ValueError(f'Unknown tool: {name}')
 
     def _record_patch(self, path, before, after, mode):
         directory = self.path('.local-coder/undo')
@@ -312,7 +332,7 @@ class WorkspaceTools:
         with state['lock']:
             output = state['output'].decode(errors='replace')
         return {'process_id': key, 'exit_code': code, 'running': code is None,
-                'timed_out': state['timed_out'], 'output_truncated': state['output_truncated'], 'output': output}
+                'timed_out': state['timed_out'], 'cancelled': state.get('cancelled', False), 'output_truncated': state['output_truncated'], 'output': output}
 
     @staticmethod
     def _kill(state):

@@ -40,6 +40,8 @@ class ScriptedModel:
         if previous.get('role') == 'tool':
             try:
                 result = json.loads(previous['content'])
+                if isinstance(result, dict) and 'status' in result:
+                    result = result.get('data')
             except (ValueError, TypeError):
                 pass
         if isinstance(result, dict) and result.get('running'):
@@ -152,7 +154,7 @@ def evaluate(case, scripted=False, profile=None, model=None):
         for event in events:
             if event['type'] == 'tool_finished' and event['name'] in ('run_command', 'poll_process'):
                 try:
-                    output = json.loads(event['output'])
+                    output = event['result']['data']
                     if not output['running']:
                         command_exits.append(output['exit_code'])
                 except (ValueError, KeyError, TypeError):
@@ -166,13 +168,13 @@ def evaluate(case, scripted=False, profile=None, model=None):
         if case == 'recovery':
             checks['agent_observed_initial_failure'] = 1 in command_exits
         if case == 'navigation':
-            checks['repository_observed'] = any(e['type'] == 'tool_finished' and e['name'] in ('read_file', 'search_code') and not e['output'].startswith('Error:') for e in events)
+            checks['repository_observed'] = any(e['type'] == 'tool_finished' and e['name'] in ('read_file', 'search_code') and e['result']['status'] == 'success' for e in events)
             checks['correct_locations'] = 'calc/core.py' in final.text and 'calc/__init__.py' in final.text
         return {'case': case, 'passed': all(checks.values()), 'checks': checks,
                 'outcome': final.status, 'reason': final.reason, 'seconds': round(elapsed, 3),
                 'generated_tokens': sum(r.generated_tokens for r in results),
                 'tool_calls': sum(e['type'] == 'tool_started' for e in events),
-                'tool_failures': sum(e['type'] == 'tool_finished' and e['output'].startswith('Error:') for e in events),
+                'tool_failures': sum(e['type'] == 'tool_finished' and e['result']['status'] in ('error', 'failed', 'timed_out') for e in events),
                 'changed_files': changed, 'command_exit_codes': command_exits,
                 'fixture_test_exit_code': tests.returncode}
 

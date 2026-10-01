@@ -7,6 +7,7 @@ from typing import Literal
 
 from jsonschema import validate, ValidationError
 from session import ContextManager
+from tool_result import ToolResult, invoke_tool
 
 MAX_AGENT_ITERATIONS = 10
 
@@ -161,41 +162,40 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 cache_key = json.dumps([name, args], sort_keys=True)
                 read_names = {'read_file', 'search_code', 'list_directory', 'batch_read', 'batch_search'}
                 if name in read_names and cache_key in read_cache:
-                    output = read_cache[cache_key]
+                    tool_result = read_cache[cache_key]
                     emit({'type': 'tool_reused', 'name': name, 'call_id': call['id']})
                 else:
-                    output = mcp_client.call_tool(name, args) or '(empty result)'
-                    if name in read_names and not str(output).startswith('Error:'):
-                        read_cache[cache_key] = output
+                    tool_result = invoke_tool(mcp_client, name, args)
+                    if name in read_names and not tool_result.is_error:
+                        read_cache[cache_key] = tool_result
                     if name not in read_names:
                         read_cache.clear()
                 metrics['tool_seconds'] += time.monotonic() - phase
-                output = str(output)
             except (ValueError, TypeError, ValidationError) as exc:
-                output = f'Error: invalid tool call: {exc}'
+                tool_result = ToolResult.error('invalid_arguments', exc)
             except KeyboardInterrupt:
                 halt = finish('cancelled', 'Run cancelled.')
-                output = 'Error: tool interrupted'
+                tool_result = ToolResult(status='cancelled', error_code='interrupted')
             except Exception as exc:
-                output = f'Error: tool failed: {exc}'
+                tool_result = ToolResult.error('execution_error', exc)
             # Retain one full identical observation in the active transcript.
             # Fresh execution across steps observes external edits before deduplication.
-            original_output = output
-            if name in ('read_file', 'list_directory', 'batch_read') and not output.startswith('Error:'):
+            original_output = json.dumps(tool_result.data, sort_keys=True)
+            if name in ('read_file', 'list_directory', 'batch_read') and not tool_result.is_error:
                 observation_key = json.dumps([name, args], sort_keys=True)
                 previous = observations.get(observation_key)
-                if previous and previous[1] == output and any(m.get('tool_call_id') == previous[0] for m in messages):
-                    output = f"Unchanged observation; see tool result {previous[0]}."
+                if previous and previous[1] == original_output and any(m.get('tool_call_id') == previous[0] for m in messages):
+                    tool_result = ToolResult(data=f"Unchanged observation; see tool result {previous[0]}.")
                 else:
                     observations[observation_key] = (call['id'], original_output)
-            output = context_manager.bound_output(output)
+            output = tool_result.to_model(context_manager)
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': output})
-            emit({'type': 'tool_finished', 'name': name, 'call_id': call['id'], 'output': output})
+            emit({'type': 'tool_finished', 'name': name, 'call_id': call['id'], 'output': output, 'result': tool_result.to_dict()})
             fingerprint = json.dumps([name, raw], sort_keys=True)
-            if output.startswith('Error:'):
+            if tool_result.is_error:
                 failures[fingerprint] = failures.get(fingerprint, 0) + 1
                 if failures[fingerprint] >= 3:
-                    halt = finish('blocked', f'Repeated tool failure: {output}', 'repeated_tool_failure')
+                    halt = finish('blocked', f'Repeated tool failure: {tool_result.error_message or tool_result.error_code}', 'repeated_tool_failure')
             else:
                 failures.pop(fingerprint, None)
         if halt:
