@@ -207,7 +207,7 @@ def handle_md_command(console, max_tokens):
         typer.echo("Write cancelled.\n")
 
 
-def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind="auto"):
+def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind="auto", persistent=False):
     if mode not in MODES:
         raise typer.BadParameter('mode must be read-only, workspace-edit, or execute')
     streamed = False
@@ -225,7 +225,11 @@ def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, cons
             if event['status'] != 'completed':
                 console.print(f"Run {event['status']}: {event['reason']}", markup=False)
             streamed = False
-    return Runtime(get_llm(), os.getcwd(), config.CONFIG_DIR, mode=mode,
+    model = get_llm()
+    if persistent:
+        from inference_daemon import PersistentModel
+        model = PersistentModel(config.get_model_config(), config.CONFIG_DIR)
+    return Runtime(model, os.getcwd(), config.CONFIG_DIR, mode=mode,
         mcp_client=None if no_mcp else get_mcp_client(), emit=emit,
         budget=RunBudget(max_steps, max_seconds, token_budget),
         context_window=config.get_model_config()['n_ctx'], trace=trace, task_kind=task_kind)
@@ -251,9 +255,10 @@ def ask(
     token_budget: int = typer.Option(8192, min=1),
     trace: bool = typer.Option(False, '--trace'),
     task_kind: str = typer.Option('auto', '--task-kind', help='auto, answer, inspect, code, or all'),
+    persistent: bool = typer.Option(False, '--persistent'),
 ):
     """Ask a question or run a bounded coding task."""
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
@@ -270,10 +275,11 @@ def chat(
     token_budget: int = typer.Option(8192, min=1),
     trace: bool = typer.Option(False, '--trace'),
     task_kind: str = typer.Option('auto', '--task-kind', help='auto, answer, inspect, code, or all'),
+    persistent: bool = typer.Option(False, '--persistent'),
 ):
     """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /exit."""
     console = Console()
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent) as runtime:
         if resume:
             runtime.resume(resume)
         while True:
@@ -315,9 +321,10 @@ def edit(
     token_budget: int = typer.Option(8192, min=1),
     trace: bool = typer.Option(False, '--trace'),
     task_kind: str = typer.Option('auto', '--task-kind', help='auto, answer, inspect, code, or all'),
+    persistent: bool = typer.Option(False, '--persistent'),
 ):
     """Apply targeted edits; --mode execute also permits validation commands."""
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
@@ -440,6 +447,31 @@ def benchmark(
     except (OSError, ValueError) as exc:
         typer.echo(f'Benchmark failed: {exc}', err=True)
         raise typer.Exit(1)
+
+
+@app.command()
+def inference_server(stop: bool = typer.Option(False, '--stop')):
+    """Run the private inference daemon in the foreground, or stop it."""
+    from inference_daemon import InferenceDaemon, PersistentModel
+    if stop:
+        client = PersistentModel({'backend': 'embedded'}, config.CONFIG_DIR, autostart=False)
+        try:
+            client.stop()
+        except OSError as exc:
+            raise typer.BadParameter(f'Daemon unavailable: {exc}')
+        typer.echo('Daemon stopping.')
+        return
+    from inference_daemon import normalized_profile
+    profile = config.get_model_config()
+    if profile.get('backend', 'embedded') != 'embedded':
+        raise typer.BadParameter('The private daemon is for embedded models')
+    model = create_model(normalized_profile(profile))
+    with InferenceDaemon(config.CONFIG_DIR / 'inference.sock', model) as server:
+        typer.echo('Inference daemon running; Ctrl-C to stop.')
+        try:
+            server.serve_forever(poll_interval=0.05)
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":
