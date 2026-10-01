@@ -61,7 +61,8 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0}
 
     def finish(status, text, reason=''):
-        result = RunResult(status, text, steps, generated, reason, {**metrics, 'total_seconds': time.monotonic() - started})
+        result = RunResult(status, text, steps, generated, reason, {**metrics, 'total_seconds': time.monotonic() - started,
+            'token_cache_hits': context_manager.cache_hits, 'token_cache_misses': context_manager.cache_misses})
         emit({'type': 'run_finished', 'status': status, 'reason': reason})
         return result
 

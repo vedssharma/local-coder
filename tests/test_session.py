@@ -65,3 +65,35 @@ def test_output_truncation_handles_unwritable_artifact_location(tmp_path):
     output = context.bound_output('x' * 10000)
     assert 'Could not retain full output' in output
     assert location.read_text() == 'existing user file'
+
+
+def test_token_cache_reuses_unchanged_fragments_and_invalidates_on_mutation():
+    calls = []
+    def count(text):
+        calls.append(text)
+        return len(text)
+    context = ContextManager(10000, count_tokens=count, cache_entries=4)
+    messages = [{'role': 'system', 'content': 'instructions'}, {'role': 'user', 'content': 'question'}]
+    schemas = [{'name': 'tool'}]
+    first = context.size(messages, schemas)
+    assert len(calls) == 3
+    assert context.size(messages, schemas) == first and len(calls) == 3
+    messages.append({'role': 'assistant', 'content': 'answer'})
+    context.size(messages, schemas)
+    assert len(calls) == 4
+    messages[1]['content'] = 'changed'
+    context.size(messages, schemas)
+    assert len(calls) > 4
+    context.count_tokens = lambda text: 2 * len(text)
+    assert context.size(messages, schemas) > first
+    assert context.cache_misses > 0
+    assert len(context._counts) <= 4
+
+
+def test_cached_and_uncached_context_budgets_agree():
+    cached = ContextManager(8192)
+    uncached = ContextManager(8192, cache_entries=0)
+    messages = [{'role': 'user', 'content': 'hello'}]
+    for index in range(20):
+        messages.append({'role': 'assistant', 'content': str(index)})
+        assert cached.size(messages, []) == uncached.size(messages, [])
