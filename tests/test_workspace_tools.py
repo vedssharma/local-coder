@@ -168,3 +168,28 @@ def test_batches_preserve_order_and_scope(tmp_path):
     assert result[2]['output'].startswith('Error:')
     searches = json.loads(tools.call_tool('batch_search', {'requests': [{'pattern': 'alpha'}, {'pattern': 'beta'}]}))
     assert 'a.py' in searches[0]['output'] and 'b.py' in searches[1]['output']
+
+
+def test_completed_process_cancel_preserves_success_and_cleanup_is_once(tmp_path, monkeypatch):
+    from workspace_tools import WorkspaceTools
+    import sys
+    import os
+    signals=[]
+    real_killpg=os.killpg
+    def track(group, signal):
+        signals.append(group)
+        return real_killpg(group,signal)
+    monkeypatch.setattr(os,'killpg',track)
+    tools=WorkspaceTools(tmp_path,mode='execute')
+    try:
+        started=tools.execute_tool('run_command',{'argv':[sys.executable,'-c','print("ok")']})
+        key=started.data['process_id']
+        tools.processes[key]['proc'].wait(timeout=5)
+        first=tools.execute_tool('poll_process',{'process_id':key})
+        cancelled=tools.execute_tool('cancel_process',{'process_id':key})
+        repeated=tools.execute_tool('poll_process',{'process_id':key})
+        assert first.status==cancelled.status==repeated.status=='success'
+        assert not cancelled.data['cancelled']
+    finally:
+        tools.close()
+    assert len(signals)==1

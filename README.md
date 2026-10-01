@@ -61,7 +61,7 @@ python main.py edit "Fix the failing tests and verify the changes" --mode execut
 python main.py chat --mode execute --max-steps 60 --max-seconds 600 --token-budget 16384
 ```
 
-The native tools are `read_file` (line ranges), `list_directory`, `search_code` (content search via `rg`), `apply_patch` (exactly one matching block, or creation of a new file), `git_diff`, and—in execute mode—`run_command`, `bash`, `poll_process`, and `cancel_process`. `run_command` takes an argv array; `bash` takes a `command` string and supports Bash syntax such as pipes, redirects, and multiline scripts. Both return combined stdout/stderr, exit status, and a process handle. Their timeout is 1–300 seconds. The runtime terminates remaining command processes when it closes.
+The native tools are `read_file` (line ranges), `list_directory`, `search_code` (content search via `rg`), `batch_read`, `batch_search`, `web_search`, `web_fetch`, `read_artifact`, `apply_patch` (exactly one matching block, or creation of a new file), `git_diff`, and—in execute mode—`run_command`, `bash`, `poll_process`, and `cancel_process`. `run_command` takes an argv array; `bash` takes a `command` string and supports Bash syntax such as pipes, redirects, and multiline scripts. Both return combined stdout/stderr, exit status, and a process handle. Their timeout is 1–300 seconds. The runtime terminates remaining command processes when it closes.
 
 For example, the agent can call `bash` with `{"command": "python -m pytest -q", "cwd": ".", "timeout_seconds": 120}`. Poll the returned `process_id` with `poll_process` until `running` is false, or use `cancel_process` to stop it. Output retains at most 32,000 bytes and reports truncation. Bash must be installed on PATH; it runs without profile or rc files, with stdin closed. Each call starts a fresh shell; variables and working-directory changes do not persist between calls. The optional `cwd` must resolve inside the workspace. Like `run_command`, `bash` runs with host privileges in execute mode; the command body is not filesystem-sandboxed.
 
@@ -217,13 +217,13 @@ Use named baseline/speculative profiles with `benchmark --compare`, then compare
 
 The agent consumes `ToolResult` objects through `execute_tool`; the existing `call_tool` string API remains a compatibility wrapper. Model tool messages are JSON envelopes containing `status`, `data`, `error_code`, `error_message`, `retryable`, `duration_seconds`, and `artifacts`. Large payloads are bounded without truncating the JSON envelope or its status, and the full payload is retained as an artifact when possible.
 
-Statuses distinguish successful observations, running processes, nonzero command exits (`failed` / `command_failed`), launch or validation errors (`error`), timeouts, and cancellation. Native and MCP tools report errors structurally; ordinary content beginning with `Error:` remains successful data. Batch results include each child's structured outcome. `tool_finished` events include both the model-facing output and the structured result. Retryability is metadata only; no automatic retries have been added.
+Statuses distinguish successful observations, running processes, nonzero command exits (`failed` / `command_failed`), launch or validation errors (`error`), timeouts, and cancellation. Native and MCP tools report errors structurally; ordinary content beginning with `Error:` remains successful data. Batch results include each child's structured outcome. `tool_finished` events include both the model-facing output and the structured result. Retryability is consumed only by the bounded retry policy for explicitly safe reads.
 
 ### Tool registry
 
 Each native tool has one `ToolSpec` registration in `WorkspaceTools._register_tools`: its schema, handler, minimum permission mode, side effects, concurrency policy, observation-reuse policy, task categories, and optional timeout defaults/limits. Schemas returned to callers are independent snapshots. JSON Schema validators are compiled once per registration and reused by direct calls and the agent loop. The registry controls tool exposure, dispatch, argument validation, and the loop's cache invalidation; batch tools consult the child's concurrency policy before running reads in parallel.
 
-Known read-only MCP tools are registered separately with conservative scheduling metadata. They cannot shadow native tools or grant additional permissions. Unknown legacy clients remain supported, but receive conservative metadata rather than inferred permission to reuse or parallelize their calls. The registry prepares for broader scheduling; it does not yet parallelize arbitrary model-issued tool calls.
+Known read-only MCP tools are registered separately with conservative scheduling metadata. They cannot shadow native tools or grant additional permissions. Unknown legacy clients remain supported, but receive conservative metadata rather than inferred permission to reuse or parallelize their calls. The scheduler uses this metadata to parallelize only explicitly eligible independent reads.
 
 ### Runtime-managed command waiting
 
@@ -231,4 +231,54 @@ The CLI and MCP runtime wait up to 2 seconds for each `run_command`, `bash`, or 
 
 Use `--process-wait-seconds 0` on `ask`, `chat`, or `edit` to retain immediate handles, or choose a wait interval up to 30 seconds. MCP hosts can set `LOCAL_CODER_PROCESS_WAIT_SECONDS` at server launch. The runtime emits incremental `process_output` events while waiting, and the CLI displays them. Terminal output remains capped at 32,000 bytes; missing output is marked as truncated.
 
-Waiting respects the remaining run deadline and cancellation signal. Cancellation or budget exhaustion cleans up outstanding process groups, including jobs that outlasted an earlier wait interval; closing the runtime also stops them. Native command timeouts still apply. A successful model response can still leave a command running inside an open chat runtime, so a process handle alone is not evidence that a check passed. This milestone does not add general tool retries, arbitrary concurrent scheduling, or interruptible embedded inference.
+Waiting respects the remaining run deadline and cancellation signal. Cancellation or budget exhaustion cleans up outstanding process groups, including jobs that outlasted an earlier wait interval; closing the runtime also stops them. Native command timeouts still apply. A model response can still leave a command running inside an open chat runtime, which is reported as `blocked` / `verification_in_progress`; so a process handle alone is not evidence that a check passed. This process waiting policy does not make embedded inference forcibly interruptible.
+
+### Shared execution deadlines
+
+A run now supplies one `ExecutionContext` to the model adapter and native/MCP tools. Command timers, HTTP request timeouts, and MCP waits are capped by the remaining run budget. Cancellation is checked before dispatch, during native capture/batch work, between streamed model chunks, and while waiting for active HTTP or daemon sockets. Active socket reads are interrupted by shutting down the connection; cancellation prevents subsequent mutations from starting.
+
+Python file/DNS operations and connecting sockets retain platform interruption limits. Embedded llama.cpp calls cannot be forcibly interrupted inside a native generation step; persistent daemon clients can disconnect, but that does not forcibly terminate the server's native generation. Execute mode still uses host privileges.
+
+### Recovery and progress detection
+
+Explicitly retry-safe reads can retry transient failures at most twice, with short exponential backoff inside the shared run budget. Retry events and attempt counts are observable. Commands, edits, permission failures, invalid arguments, and stale patches are never blindly retried; a stale patch returns `stale_patch` so the model can reread and repair its arguments. HTTP status errors distinguish retryable throttling/server failures from access denials.
+
+The loop detects repeated semantic observations and short cycles without progress and returns `blocked` with reason `no_progress`. Live process observations are exempt: silent commands remain bounded by their timeouts and the run deadline, rather than being mistaken for a stuck model.
+
+### Concurrent read scheduling
+
+Adjacent independent read/search/web calls marked parallel-safe execute with at most four workers by default; model tool results retain the original call order. Identical cacheable observations share one execution. Serial tools and mutations drain the preceding read group before executing, invalidate stale observation caches, and finish before subsequent reads begin. Batch tools own their existing bounded worker pool and are serial in the outer scheduler to avoid nested worker multiplication. Unknown MCP/legacy tools remain serial.
+
+Set `--tool-workers` on `ask`, `chat`, or `edit` (1–8), or `LOCAL_CODER_TOOL_WORKERS` at MCP launch. One worker preserves serial read execution. Output events may arrive in execution order, while transcript results remain in call order. Cancellation and validation apply to each scheduled operation.
+
+### Active-turn context and artifacts
+
+Long turns can compact older completed tool exchanges without splitting call/result pairs. The current request and newest exchange remain; compacted evidence retains concise failures, edit/check outcomes, decisions, and content-addressed archive references. If the newest output alone is oversized, its payload is shortened while status and exit metadata remain intact. Evidence summaries are untrusted user-role data, never new system instructions. Requests or schemas that cannot fit still fail explicitly.
+
+`read_artifact(artifact_id, offset=0, max_bytes=4000)` retrieves retained output by validated SHA-256 artifact ID. Follow `next_offset` until `eof`; slices may be shorter than requested to fit the tool-message budget. This works for one-line JSON output as well as logs. The reader confines access to immutable harness artifacts, rejects traversal and symlinks, and does not accept arbitrary file paths. Large model-facing tool envelopes retain structured command status and archive IDs rather than losing exit metadata to truncation.
+
+### Checkpointed execution
+
+Session snapshots now contain a durable call journal. The runtime saves the assistant batch before dispatch, validated arguments and side-effect metadata before executing each operation, and its outcome immediately afterward. Atomic snapshots are fsynced, and an exclusive session lease prevents two runtimes from concurrently continuing the same session. Version-one transcripts remain loadable.
+
+Resume reconstructs missing tool results from completed journal entries and never automatically replays prior commands or edits. Pending calls receive `not_executed`; calls interrupted during execution or old live process handles receive `interrupted_operation`. Interrupted edits require a fresh read of the affected file before further mutations. Unknown command effects require explicit acknowledgement after inspection (`Runtime.acknowledge_interrupted()` or `/acknowledge-interrupted` in CLI chat). Acknowledgement does not mark an operation successful or grant additional tool permissions.
+
+### Evidence-aware completion
+
+`RunResult` and `turn_result`/`verification_result` events report changed files, observed check commands and exit codes, outstanding jobs, and a separate `verification_status`: `not_run`, `passed`, `failed`, `stale`, `in_progress`, or `requires_review`. Standard test argv commands are recognized; use `verification=true` for other genuine checks, including Bash commands. Preserve the check's exit status rather than masking it with a later successful shell command.
+
+The latest rerun of the same command replaces its earlier result; independent failed checks remain failures. Applying a patch invalidates checks recorded before that edit. Merely observing `git_diff` does not invalidate them. Final model prose is labeled as a model summary when evidence contradicts completion; the runtime returns `blocked` for failed/stale checks, outstanding jobs, and interrupted effects requiring inspection. Edits with no checks are explicitly reported as unverified.
+
+Verification covers observed commands and changes, not test coverage or task correctness. Arbitrary shell/MCP mutations are not fully tracked, and an exit-zero command does not establish that a meaningful check ran. Real-model evaluations and appropriate project tests remain necessary.
+
+### Loop regression evaluations
+
+The expanded suite adds eight fault-injection cases: malformed arguments with recovery, transient read retries, cancellation with a pending mutation, overlapping reads with ordered results, long-turn compaction, inspection after an interrupted write, permission enforcement against untrusted web instructions, and a false claim that a failing check passed.
+
+```bash
+python evaluations/run.py --scripted --suite all --output /tmp/all-mechanics.json
+python evaluations/run.py --scripted --suite all --baseline /tmp/all-mechanics.json --output /tmp/after.json
+python evaluations/run.py --profile small --allow-execution --baseline /tmp/small-quality.json --output /tmp/small-after.json
+```
+
+Reports include model requests, tool calls, retries, generated tokens, elapsed time, verification state, and per-case success criteria. Baseline comparisons show metric deltas and success changes; modes must match. Keep environment, model settings, and workloads comparable, and repeat real-model runs before attributing timing differences to an optimization. Loop fault injection requires `--scripted`; its web case tests permission enforcement against deliberately hostile tool content, not a model's resistance to prompt injection. Actual abrupt-process crash recovery is additionally exercised by the subprocess regression tests.

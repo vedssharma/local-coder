@@ -10,7 +10,16 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 from urllib.request import Request, HTTPRedirectHandler, build_opener, getproxies, proxy_bypass
 
 
+from contextlib import nullcontext
+from execution_context import CURRENT_CONTEXT
+
 MAX_BYTES = 1_000_000
+
+
+class WebRequestError(ValueError):
+    def __init__(self, message, code, retryable=False):
+        super().__init__(message)
+        self.code, self.retryable = code, retryable
 
 
 def public_url(url):
@@ -57,10 +66,14 @@ class PublicRedirect(HTTPRedirectHandler):
 def retrieve(url, timeout_seconds=20, headers=None):
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 30:
         raise ValueError('timeout_seconds must be between 1 and 30')
+    context = CURRENT_CONTEXT.get()
+    if context:
+        context.check()
     public_url(url)
     request = Request(url, headers={'User-Agent': 'local-coder/1.0', 'Accept-Encoding': 'identity', **(headers or {})})
     try:
-        with build_opener(PublicRedirect()).open(request, timeout=timeout_seconds) as response:
+        timeout = context.timeout(timeout_seconds) if context else timeout_seconds
+        with build_opener(PublicRedirect()).open(request, timeout=timeout) as response, (context.response_guard(response) if context else nullcontext()):
             data = response.read(MAX_BYTES + 1)
             encoding = response.headers.get_content_charset() or 'utf-8'
             try:
@@ -72,9 +85,11 @@ def retrieve(url, timeout_seconds=20, headers=None):
                     'body': body,
                     'truncated': len(data) > MAX_BYTES}
     except HTTPError as exc:
-        raise ValueError(f'Web request returned HTTP {exc.code}; check destination access and provider availability') from None
+        raise WebRequestError(f'Web request returned HTTP {exc.code}; check destination access and provider availability',
+                              f'http_{exc.code}', exc.code in (408, 429, 500, 502, 503, 504)) from None
     except URLError as exc:
-        raise ValueError(f'Web request failed: {exc.reason}') from None
+        raise WebRequestError(f'Web request failed: {exc.reason}', 'network_error',
+                              '403' not in str(exc.reason)) from None
 
 
 class PageParser(HTMLParser):

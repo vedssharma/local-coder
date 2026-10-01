@@ -9,6 +9,10 @@ from jsonschema import ValidationError
 from session import ContextManager
 from tool_result import ToolResult, invoke_tool
 from tool_registry import ToolRegistry, ToolSpec
+from execution_context import ExecutionContext, ExecutionCancelled, DeadlineExceeded
+import threading
+from tool_recovery import ProgressTracker
+from tool_scheduler import ToolScheduler
 
 MAX_AGENT_ITERATIONS = 10
 
@@ -32,6 +36,11 @@ class RunResult:
     generated_tokens: int = 0
     reason: str = ''
     performance: dict = field(default_factory=dict)
+    changed_files: list[str] = field(default_factory=list)
+    checks: list[dict] = field(default_factory=list)
+    outstanding_processes: list[dict] = field(default_factory=list)
+    verification_status: str = 'not_run'
+    verification_scope: str = 'observed_commands_and_changes'
 
 
 def _build_tool_schemas(mcp_client=None):
@@ -42,12 +51,14 @@ def _build_tool_schemas(mcp_client=None):
 
 def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
               cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None, tool_schemas=None,
-              tool_executor=None):
+              tool_executor=None, execution_context=None, tool_workers=4, checkpoint=None, reserved_call_ids=()):
     """Run a turn. Completion means the model finished, not that its claims were verified.
 
     Time and cancellation are checked between model/tool operations. Blocking model
     calls require backend timeouts; this engine never promises to interrupt them.
     """
+    checkpoint = checkpoint or (lambda *a: None)
+    reserved_call_ids = set(reserved_call_ids)
     budget = budget or RunBudget()
     emit = emit or (lambda event: None)
     schemas = _build_tool_schemas(mcp_client) if tool_schemas is None else tool_schemas
@@ -65,6 +76,11 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     context_manager = context_manager or ContextManager(window=32768)
     started, generated, failures, steps = time.monotonic(), 0, {}, 0
 
+    execution_context = execution_context or ExecutionContext(started + budget.max_seconds, cancel_event or threading.Event())
+    if isinstance(llm, ModelAdapter):
+        llm.execution_context = execution_context
+
+    progress = ProgressTracker()
     observations = {}
     metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0}
 
@@ -105,8 +121,10 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             message['role'] = 'assistant'
             if message.get('content') is not None and not isinstance(message['content'], str):
                 raise ValueError('Model returned invalid text content')
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, ExecutionCancelled):
             return finish('cancelled', 'Run cancelled.')
+        except DeadlineExceeded:
+            return finish('budget_exhausted', 'Run deadline exceeded.', 'deadline')
         except Exception as exc:
             return finish('blocked', f'Model request failed: {exc}', 'model_error')
         usage = response.get('usage', {}).get('completion_tokens')
@@ -134,61 +152,38 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
         # Validate the envelope before appending it so transcripts remain resumable.
         ids = set()
-        prior_ids = {m['tool_call_id'] for m in messages if m.get('role') == 'tool'}
+        prior_ids = {m['tool_call_id'] for m in messages if m.get('role') == 'tool'} | set(reserved_call_ids)
         for call in calls:
             if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
                 return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
+            if not isinstance(call['function'].get('name'), str):
+                return finish('blocked', 'Model returned an invalid tool name.', 'invalid_protocol')
             key = call.get('id') or f'call_{step}_{len(ids)}'
             if not isinstance(key, str):
                 return finish('blocked', 'Model returned an invalid tool call ID.', 'invalid_protocol')
             if key in ids:
                 return finish('blocked', 'Model returned duplicate tool call IDs.', 'invalid_protocol')
-            if key in prior_ids:
+            while key in prior_ids:
                 key = f'{key}_{step}_{len(ids)}'
             call['id'] = key
             ids.add(key)
+        reserved_call_ids.update(ids)
         messages.append(message)
+        checkpoint('batch', message, None, None)
         halt = None
-        read_cache = {}
-        for call in calls:
-            name = call['function'].get('name')
+        scheduler = ToolScheduler(registry, registered,
+            tool_executor or (lambda name, args: invoke_tool(mcp_client, name, args)),
+            execution_context, emit, tool_workers, checkpoint)
+        for call, args, tool_result in scheduler.run(calls):
+            name = call['function']['name']
             raw = call['function'].get('arguments')
-            emit({'type': 'tool_started', 'name': name, 'call_id': call['id']})
-            try:
-                if halt:
-                    raise ValueError('Run stopped; tool was not executed')
-                if result := stopped():
-                    halt = result
-                    raise ValueError('Run stopped; tool was not executed')
-                if name not in registered:
-                    raise ValueError(f'Unknown or unavailable tool: {name}')
-                args = json.loads(raw) if isinstance(raw, str) else raw
-                registry.validate(name, args)
-                phase = time.monotonic()
-                metrics['tool_calls'] += 1
-                cache_key = json.dumps([name, args], sort_keys=True)
-                spec = registry.get(name)
-                if spec.cacheable and cache_key in read_cache:
-                    tool_result = read_cache[cache_key]
-                    emit({'type': 'tool_reused', 'name': name, 'call_id': call['id']})
-                else:
-                    tool_result = tool_executor(name, args) if tool_executor else invoke_tool(mcp_client, name, args)
-                    if spec.cacheable and tool_result.status == 'success':
-                        read_cache[cache_key] = tool_result
-                    if spec.side_effects != 'none':
-                        read_cache.clear()
-                metrics['tool_seconds'] += time.monotonic() - phase
-                if result := stopped():
-                    halt = result
-            except (ValueError, TypeError, ValidationError) as exc:
-                tool_result = ToolResult.error('invalid_arguments', exc)
-            except KeyboardInterrupt:
+            if tool_result.status == 'cancelled' and not halt:
                 halt = finish('cancelled', 'Run cancelled.')
-                tool_result = ToolResult(status='cancelled', error_code='interrupted')
-            except Exception as exc:
-                tool_result = ToolResult.error('execution_error', exc)
+            if result := stopped():
+                halt = halt or result
             # Retain one full identical observation in the active transcript.
             # Fresh execution across steps observes external edits before deduplication.
+            no_progress = progress.observe(name, args, tool_result)
             original_output = json.dumps(tool_result.data, sort_keys=True)
             spec = registry.get(name)
             if spec and spec.compact_observation and tool_result.status == 'success':
@@ -200,15 +195,23 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                     observations[observation_key] = (call['id'], original_output)
             output = tool_result.to_model(context_manager)
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': output})
+            checkpoint('observed',call,args,tool_result)
             emit({'type': 'tool_finished', 'name': name, 'call_id': call['id'], 'output': output, 'result': tool_result.to_dict()})
             fingerprint = json.dumps([name, raw], sort_keys=True)
+            if no_progress and not halt:
+                halt = finish('blocked', 'Repeated tool calls are making no observable progress.', 'no_progress')
             if tool_result.is_error:
                 failures[fingerprint] = failures.get(fingerprint, 0) + 1
                 if failures[fingerprint] >= 3:
                     halt = finish('blocked', f'Repeated tool failure: {tool_result.error_message or tool_result.error_code}', 'repeated_tool_failure')
             else:
                 failures.pop(fingerprint, None)
+            if halt:
+                scheduler.stopped = True
+        metrics['tool_seconds'] += scheduler.elapsed
+        metrics['tool_calls'] += scheduler.executions
         if halt:
+            halt.performance.update(metrics)
             return halt
     return finish('budget_exhausted', 'Step budget exhausted; work may be incomplete.', 'step_limit')
 

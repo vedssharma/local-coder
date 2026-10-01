@@ -282,8 +282,8 @@ class TestRunAgentLoop:
         result = agent.run_agent_loop(
             llm, messages, mock_console, max_tokens=64, mcp_client=client
         )
-        assert "budget exhausted" in result.lower()
-        assert llm.create_chat_completion.call_count == agent.MAX_AGENT_ITERATIONS
+        assert "no observable progress" in result.lower()
+        assert llm.create_chat_completion.call_count == 6
 
     def test_nudge_sent_on_empty_response(self, mock_llm, mock_console):
         """Empty content + no tool calls causes a nudge message to be appended."""

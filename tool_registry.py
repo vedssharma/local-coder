@@ -25,6 +25,7 @@ class ToolSpec:
     max_timeout: int | None = None
     native: bool = True
     wait_for_process: bool = False
+    retry_safe: bool = False
     validator: object = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -40,6 +41,8 @@ class ToolSpec:
             raise ValueError('Observation compaction requires a cacheable tool')
         if self.wait_for_process and self.side_effects != 'process':
             raise ValueError('Process waiting requires a process tool')
+        if self.retry_safe and self.side_effects not in ('none', 'network'):
+            raise ValueError('Only explicitly safe reads may be retried')
         definition = deepcopy(self.schema)
         parameters = definition['function'].get('parameters', {'type': 'object'})
         validator_class = validator_for(parameters)
