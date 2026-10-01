@@ -14,6 +14,7 @@ import web_tools
 from tool_result import ToolResult, invoke_tool
 from tool_registry import ToolRegistry, ToolSpec, MODES, MCP_READ_TOOLS
 from jsonschema import ValidationError
+from execution_context import CURRENT_CONTEXT, ExecutionCancelled, DeadlineExceeded
 
 
 def schema(name, description, properties, required=()):
@@ -169,14 +170,22 @@ class WorkspaceTools:
     def call_tool(self, name, args):
         return self.execute_tool(name, args).to_legacy()
 
-    def execute_tool(self, name, args):
+    def execute_tool(self, name, args, context=None):
+        context = context or CURRENT_CONTEXT.get()
+        token = CURRENT_CONTEXT.set(context)
         started = time.monotonic()
         try:
+            if context:
+                context.check()
             self.registry.require(name, self.mode)
             self.registry.validate(name, args)
             self.authorize(name, args)
             data = self.registry.get(name).handler(args)
             result = data if isinstance(data, ToolResult) else ToolResult(data=data)
+        except ExecutionCancelled as exc:
+            result = ToolResult(status='cancelled', error_code='interrupted', error_message=str(exc))
+        except DeadlineExceeded as exc:
+            result = ToolResult(status='timed_out', error_code='run_deadline', error_message=str(exc))
         except PermissionError as exc:
             result = ToolResult.error('permission_denied', exc)
         except FileNotFoundError as exc:
@@ -187,6 +196,8 @@ class WorkspaceTools:
             result = ToolResult.error('tool_timeout', exc, retryable=True)
         except OSError as exc:
             result = ToolResult.error('io_error', exc)
+        finally:
+            CURRENT_CONTEXT.reset(token)
         result.duration_seconds = time.monotonic() - started
         return result
 
@@ -209,7 +220,7 @@ class WorkspaceTools:
         # one execution; each request still gets its ordered result.
         unique = {json.dumps(a, sort_keys=True): a for a in requests}
         with ThreadPoolExecutor(max_workers=min(4, len(unique))) as pool:
-            futures = {key: pool.submit(self.execute_tool, child, value) for key, value in unique.items()}
+            futures = {key: pool.submit(self.execute_tool, child, value, context=CURRENT_CONTEXT.get()) for key, value in unique.items()}
             results = {key: future.result() for key, future in futures.items()}
         return [{'request': value, 'result': results[json.dumps(value, sort_keys=True)].to_dict(),
                  'output': results[json.dumps(value, sort_keys=True)].to_legacy()} for value in requests]
@@ -228,6 +239,8 @@ class WorkspaceTools:
         lines = []
         with p.open() as f:
             for n, line in enumerate(f, 1):
+                if CURRENT_CONTEXT.get():
+                    CURRENT_CONTEXT.get().check()
                 if n > end:
                     break
                 if n >= start:
@@ -360,6 +373,8 @@ class WorkspaceTools:
             raise ValueError('argv must be a nonempty string array')
         if not 1 <= timeout <= 300:
             raise ValueError('timeout_seconds must be between 1 and 300')
+        if CURRENT_CONTEXT.get():
+            timeout = CURRENT_CONTEXT.get().timeout(timeout)
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 start_new_session=True)
@@ -412,7 +427,17 @@ class WorkspaceTools:
     def _capture(self, argv):
         result = self._start(argv, self.root, 30)
         state = self.processes[result['process_id']]
-        state['proc'].wait()
+        context = CURRENT_CONTEXT.get()
+        while state['proc'].poll() is None:
+            try:
+                if context:
+                    context.wait(0.05)
+                else:
+                    time.sleep(0.01)
+            except (ExecutionCancelled, DeadlineExceeded) as exc:
+                state['cancelled' if isinstance(exc, ExecutionCancelled) else 'timed_out'] = True
+                self._kill(state)
+                break
         result = self._poll(result['process_id'])
         del self.processes[result['process_id']]
         return result

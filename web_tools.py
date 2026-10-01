@@ -10,6 +10,9 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 from urllib.request import Request, HTTPRedirectHandler, build_opener, getproxies, proxy_bypass
 
 
+from contextlib import nullcontext
+from execution_context import CURRENT_CONTEXT
+
 MAX_BYTES = 1_000_000
 
 
@@ -57,10 +60,14 @@ class PublicRedirect(HTTPRedirectHandler):
 def retrieve(url, timeout_seconds=20, headers=None):
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 30:
         raise ValueError('timeout_seconds must be between 1 and 30')
+    context = CURRENT_CONTEXT.get()
+    if context:
+        context.check()
     public_url(url)
     request = Request(url, headers={'User-Agent': 'local-coder/1.0', 'Accept-Encoding': 'identity', **(headers or {})})
     try:
-        with build_opener(PublicRedirect()).open(request, timeout=timeout_seconds) as response:
+        timeout = context.timeout(timeout_seconds) if context else timeout_seconds
+        with build_opener(PublicRedirect()).open(request, timeout=timeout) as response, (context.response_guard(response) if context else nullcontext()):
             data = response.read(MAX_BYTES + 1)
             encoding = response.headers.get_content_charset() or 'utf-8'
             try:

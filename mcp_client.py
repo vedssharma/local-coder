@@ -13,6 +13,7 @@ import os
 import threading
 import time
 from tool_result import ToolResult
+from execution_context import CURRENT_CONTEXT, ExecutionCancelled, DeadlineExceeded
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession, StdioServerParameters
@@ -162,7 +163,23 @@ class MCPClient:
             return ToolResult.error('disconnected', 'MCP client is not connected')
         future = asyncio.run_coroutine_threadsafe(self._execute_tool_async(name, arguments), self._loop)
         try:
-            result = future.result(timeout=30)
+            context = CURRENT_CONTEXT.get()
+            if context:
+                while True:
+                    context.check()
+                    try:
+                        result = future.result(timeout=context.timeout(0.05))
+                        break
+                    except TimeoutError:
+                        context.check()
+            else:
+                result = future.result(timeout=30)
+        except ExecutionCancelled:
+            future.cancel()
+            result = ToolResult(status='cancelled', error_code='interrupted')
+        except DeadlineExceeded:
+            future.cancel()
+            result = ToolResult(status='timed_out', error_code='run_deadline')
         except TimeoutError:
             future.cancel()
             result = ToolResult.error('tool_timeout', 'MCP tool timed out', retryable=True)

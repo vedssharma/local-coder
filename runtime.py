@@ -80,10 +80,12 @@ class Runtime:
                                budget=self.budget, cancel_event=self.cancel_event,
                                emit=self.emit, context_manager=self.context,
                                tool_schemas=self.tools.selected_schemas(self.task_kind),
-                               tool_executor=orchestrator)
+                               tool_executor=orchestrator, execution_context=orchestrator.context)
             self.emit({'type': 'turn_result', **asdict(result)})
             return result
         finally:
+            if isinstance(self.model, ModelAdapter):
+                self.model.execution_context = None
             if self.cancel_event.is_set() or (result and result.status in ('cancelled', 'budget_exhausted')):
                 self.tools.cancel_all_processes()
             self.store.save(self.messages, self.session_id)

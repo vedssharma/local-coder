@@ -5,6 +5,7 @@ import urllib.request
 import threading
 import time
 from urllib.parse import urlparse
+from contextlib import nullcontext
 
 
 TUNING_INTS = ('n_threads', 'n_threads_batch', 'n_batch', 'n_ubatch')
@@ -50,6 +51,7 @@ class ModelAdapter:
         self.profile = dict(profile)
         self.emit = lambda event: None
         self.cancel_event = None
+        self.execution_context = None
         self._first_output = None
         self.load_seconds = 0.0
 
@@ -63,7 +65,16 @@ class ModelAdapter:
         started = time.perf_counter()
         old_load = self.load_seconds
         self._first_output = None
-        response = self._complete(**kwargs)
+        if self.execution_context:
+            self.execution_context.check()
+        try:
+            response = self._complete(**kwargs)
+        except Exception:
+            if self.execution_context:
+                self.execution_context.check()
+            raise
+        if self.execution_context:
+            self.execution_context.check()
         elapsed = time.perf_counter() - started
         usage = response.get('usage') or {}
         metrics = {'elapsed_seconds': elapsed, 'load_seconds': self.load_seconds - old_load,
@@ -91,6 +102,8 @@ class ModelAdapter:
     def collect(self, chunks):
         content, calls, reason, usage = [], {}, None, {}
         for chunk in chunks:
+            if self.execution_context:
+                self.execution_context.check()
             if self.cancel_event is not None and self.cancel_event.is_set():
                 raise KeyboardInterrupt
             usage = chunk.get('usage') or usage
@@ -232,7 +245,9 @@ class OpenAIModel(ModelAdapter):
         if os.environ.get(key_name):
             headers['Authorization'] = 'Bearer ' + os.environ[key_name]
         request = urllib.request.Request(self.url, data=json.dumps(kwargs).encode(), headers=headers)
-        with urllib.request.urlopen(request, timeout=self.profile.get('request_timeout', 60)) as response:
+        context = self.execution_context
+        timeout = context.timeout(self.profile.get('request_timeout', 60)) if context else self.profile.get('request_timeout', 60)
+        with urllib.request.urlopen(request, timeout=timeout) as response, (context.response_guard(response) if context else nullcontext()):
             if not kwargs['stream']:
                 return json.load(response)
             def chunks():

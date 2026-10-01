@@ -4,6 +4,7 @@ import time
 import codecs
 
 from tool_result import ToolResult, invoke_tool
+from execution_context import ExecutionContext, ExecutionCancelled, DeadlineExceeded
 
 
 def validate_wait_seconds(value):
@@ -19,6 +20,7 @@ class ProcessOrchestrator:
         self.deadline = deadline
         self.cancel_event = cancel_event
         self.emit = emit
+        self.context = ExecutionContext(deadline, cancel_event)
         self.output_positions = {}
         self.decoders = {}
 
@@ -45,7 +47,8 @@ class ProcessOrchestrator:
             return ToolResult(status='cancelled', error_code='interrupted')
         if started >= self.deadline:
             return ToolResult(status='timed_out', error_code='run_deadline')
-        result = invoke_tool(self.tools, name, arguments)
+        with self.context.bind():
+            result = invoke_tool(self.tools, name, arguments)
         spec = self.tools.registry.get(name)
         if not spec or not spec.wait_for_process or not isinstance(result.data, dict):
             return result

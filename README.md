@@ -232,3 +232,9 @@ The CLI and MCP runtime wait up to 2 seconds for each `run_command`, `bash`, or 
 Use `--process-wait-seconds 0` on `ask`, `chat`, or `edit` to retain immediate handles, or choose a wait interval up to 30 seconds. MCP hosts can set `LOCAL_CODER_PROCESS_WAIT_SECONDS` at server launch. The runtime emits incremental `process_output` events while waiting, and the CLI displays them. Terminal output remains capped at 32,000 bytes; missing output is marked as truncated.
 
 Waiting respects the remaining run deadline and cancellation signal. Cancellation or budget exhaustion cleans up outstanding process groups, including jobs that outlasted an earlier wait interval; closing the runtime also stops them. Native command timeouts still apply. A successful model response can still leave a command running inside an open chat runtime, so a process handle alone is not evidence that a check passed. This milestone does not add general tool retries, arbitrary concurrent scheduling, or interruptible embedded inference.
+
+### Shared execution deadlines
+
+A run now supplies one `ExecutionContext` to the model adapter and native/MCP tools. Command timers, HTTP request timeouts, and MCP waits are capped by the remaining run budget. Cancellation is checked before dispatch, during native capture/batch work, between streamed model chunks, and while waiting for active HTTP or daemon sockets. Active socket reads are interrupted by shutting down the connection; cancellation prevents subsequent mutations from starting.
+
+Python file/DNS operations and connecting sockets retain platform interruption limits. Embedded llama.cpp calls cannot be forcibly interrupted inside a native generation step; persistent daemon clients can disconnect, but that does not forcibly terminate the server's native generation. Execute mode still uses host privileges.

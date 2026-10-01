@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import nullcontext
 
 from model_backend import ModelAdapter, create_model
 
@@ -150,11 +151,15 @@ class PersistentModel(ModelAdapter):
         if len(payload) > MAX_REQUEST:
             raise ValueError('Inference request exceeds daemon limit')
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(2 if operation == 'ping' else self.profile.get('request_timeout', 300))
+            context = self.execution_context
+            timeout = 2 if operation == 'ping' else self.profile.get('request_timeout', 300)
+            connection.settimeout(context.timeout(timeout) if context else timeout)
             connection.connect(str(self.socket_path))
             connection.sendall(payload)
-            with connection.makefile('rb') as stream:
+            with connection.makefile('rb') as stream, (context.socket_guard(connection) if context else nullcontext()):
                 while True:
+                    if context:
+                        context.check()
                     if self.cancel_event is not None and self.cancel_event.is_set():
                         raise KeyboardInterrupt
                     line = stream.readline(MAX_REQUEST + 1)

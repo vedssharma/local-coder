@@ -9,6 +9,8 @@ from jsonschema import ValidationError
 from session import ContextManager
 from tool_result import ToolResult, invoke_tool
 from tool_registry import ToolRegistry, ToolSpec
+from execution_context import ExecutionContext, ExecutionCancelled, DeadlineExceeded
+import threading
 
 MAX_AGENT_ITERATIONS = 10
 
@@ -42,7 +44,7 @@ def _build_tool_schemas(mcp_client=None):
 
 def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
               cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None, tool_schemas=None,
-              tool_executor=None):
+              tool_executor=None, execution_context=None):
     """Run a turn. Completion means the model finished, not that its claims were verified.
 
     Time and cancellation are checked between model/tool operations. Blocking model
@@ -64,6 +66,10 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             registry.register(ToolSpec(definition, handler=None))
     context_manager = context_manager or ContextManager(window=32768)
     started, generated, failures, steps = time.monotonic(), 0, {}, 0
+
+    execution_context = execution_context or ExecutionContext(started + budget.max_seconds, cancel_event or threading.Event())
+    if isinstance(llm, ModelAdapter):
+        llm.execution_context = execution_context
 
     observations = {}
     metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0}
@@ -105,8 +111,10 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             message['role'] = 'assistant'
             if message.get('content') is not None and not isinstance(message['content'], str):
                 raise ValueError('Model returned invalid text content')
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, ExecutionCancelled):
             return finish('cancelled', 'Run cancelled.')
+        except DeadlineExceeded:
+            return finish('budget_exhausted', 'Run deadline exceeded.', 'deadline')
         except Exception as exc:
             return finish('blocked', f'Model request failed: {exc}', 'model_error')
         usage = response.get('usage', {}).get('completion_tokens')
@@ -172,7 +180,8 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                     tool_result = read_cache[cache_key]
                     emit({'type': 'tool_reused', 'name': name, 'call_id': call['id']})
                 else:
-                    tool_result = tool_executor(name, args) if tool_executor else invoke_tool(mcp_client, name, args)
+                    with execution_context.bind():
+                        tool_result = tool_executor(name, args) if tool_executor else invoke_tool(mcp_client, name, args)
                     if spec.cacheable and tool_result.status == 'success':
                         read_cache[cache_key] = tool_result
                     if spec.side_effects != 'none':
@@ -182,7 +191,10 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                     halt = result
             except (ValueError, TypeError, ValidationError) as exc:
                 tool_result = ToolResult.error('invalid_arguments', exc)
-            except KeyboardInterrupt:
+            except DeadlineExceeded:
+                halt = finish('budget_exhausted', 'Run deadline exceeded.', 'deadline')
+                tool_result = ToolResult(status='timed_out', error_code='run_deadline')
+            except (KeyboardInterrupt, ExecutionCancelled):
                 halt = finish('cancelled', 'Run cancelled.')
                 tool_result = ToolResult(status='cancelled', error_code='interrupted')
             except Exception as exc:
