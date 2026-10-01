@@ -121,7 +121,7 @@ class ContextManager:
         return output[:1800] + '\n[output truncated]\n' + output[-1200:] + '\n' + reference
 
 
-def repository_instructions(root, target=None):
+def repository_instructions(root, target=None, include_root=True):
     root = Path(root).resolve()
     target = Path(target).resolve() if target else root
     if not target.is_relative_to(root):
@@ -132,6 +132,8 @@ def repository_instructions(root, target=None):
     if directory != root:
         chain.append(directory)
     for folder in chain:
+        if folder == root and not include_root:
+            continue
         path = folder / 'AGENTS.md'
         if path.is_file() and path.resolve().is_relative_to(root):
             parts.append(f'Instructions for {folder.relative_to(root)}:\n' + path.read_text()[:8000])

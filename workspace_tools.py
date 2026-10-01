@@ -85,12 +85,27 @@ class WorkspaceTools:
             allowed |= {'run_command', 'poll_process', 'cancel_process'}
         return [s for s in SCHEMAS if s['function']['name'] in allowed] + extra
 
+    def selected_schemas(self, task_kind='auto'):
+        if task_kind == 'auto':
+            task_kind = 'inspect' if self.mode == 'read-only' else 'code'
+        if task_kind not in ('answer', 'inspect', 'code', 'all'):
+            raise ValueError('task_kind must be auto, answer, inspect, code, or all')
+        schemas = self.get_openai_tool_schemas()
+        if task_kind == 'answer':
+            return []
+        if task_kind == 'inspect':
+            names = {'read_file', 'list_directory', 'search_code'}
+            return [s for s in schemas if s['function']['name'] in names]
+        if task_kind == 'code':
+            return [s for s in schemas if s['function']['name'] in {s['function']['name'] for s in SCHEMAS}]
+        return schemas
+
     def call_tool(self, name, args):
         try:
             self.authorize(name, args)
             if name == 'read_file':
                 p = self.path(args['path'])
-                start, end = args.get('start_line', 1), args.get('end_line', 200)
+                start, end = args.get('start_line', 1), args.get('end_line', args.get('start_line', 1) + 99)
                 if start < 1 or end < start or end - start > 1000:
                     raise ValueError('Use a range of at most 1001 lines')
                 lines = []
@@ -101,7 +116,7 @@ class WorkspaceTools:
                         if n >= start:
                             lines.append(f'{n}: {line}')
                 from session import repository_instructions
-                instructions = repository_instructions(self.root, p)
+                instructions = repository_instructions(self.root, p, include_root=False)
                 result = ''.join(lines)[:32000] or '(empty file)'
                 return result + ('\n\n' + instructions if instructions else '')
             if name == 'list_directory':

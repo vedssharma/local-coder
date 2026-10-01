@@ -207,7 +207,7 @@ def handle_md_command(console, max_tokens):
         typer.echo("Write cancelled.\n")
 
 
-def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console):
+def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind="auto"):
     if mode not in MODES:
         raise typer.BadParameter('mode must be read-only, workspace-edit, or execute')
     streamed = False
@@ -228,7 +228,7 @@ def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, cons
     return Runtime(get_llm(), os.getcwd(), config.CONFIG_DIR, mode=mode,
         mcp_client=None if no_mcp else get_mcp_client(), emit=emit,
         budget=RunBudget(max_steps, max_seconds, token_budget),
-        context_window=config.get_model_config()['n_ctx'], trace=trace)
+        context_window=config.get_model_config()['n_ctx'], trace=trace, task_kind=task_kind)
 
 
 def execute_turn(runtime, prompt, max_tokens):
@@ -250,9 +250,10 @@ def ask(
     max_seconds: float = typer.Option(300, min=1),
     token_budget: int = typer.Option(8192, min=1),
     trace: bool = typer.Option(False, '--trace'),
+    task_kind: str = typer.Option('auto', '--task-kind', help='auto, answer, inspect, code, or all'),
 ):
     """Ask a question or run a bounded coding task."""
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console()) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
@@ -268,10 +269,11 @@ def chat(
     max_seconds: float = typer.Option(300, min=1),
     token_budget: int = typer.Option(8192, min=1),
     trace: bool = typer.Option(False, '--trace'),
+    task_kind: str = typer.Option('auto', '--task-kind', help='auto, answer, inspect, code, or all'),
 ):
     """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /exit."""
     console = Console()
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind) as runtime:
         if resume:
             runtime.resume(resume)
         while True:
@@ -312,9 +314,10 @@ def edit(
     max_seconds: float = typer.Option(300, min=1),
     token_budget: int = typer.Option(8192, min=1),
     trace: bool = typer.Option(False, '--trace'),
+    task_kind: str = typer.Option('auto', '--task-kind', help='auto, answer, inspect, code, or all'),
 ):
     """Apply targeted edits; --mode execute also permits validation commands."""
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console()) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)

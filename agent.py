@@ -39,7 +39,7 @@ def _build_tool_schemas(mcp_client=None):
 
 
 def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
-              cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None):
+              cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None, tool_schemas=None):
     """Run a turn. Completion means the model finished, not that its claims were verified.
 
     Time and cancellation are checked between model/tool operations. Blocking model
@@ -47,7 +47,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     """
     budget = budget or RunBudget()
     emit = emit or (lambda event: None)
-    schemas = _build_tool_schemas(mcp_client)
+    schemas = _build_tool_schemas(mcp_client) if tool_schemas is None else tool_schemas
     from model_backend import ModelAdapter
     if isinstance(llm, ModelAdapter) and not llm.profile.get("supports_tools", True):
         schemas = []
