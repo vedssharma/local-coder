@@ -145,13 +145,13 @@ class WorkspaceTools:
         self.registry.register(ToolSpec(
             schema('batch_read', 'Read up to eight independent file ranges in one call, in input order.',
            {'requests': {'type': 'array', 'items': READ_REQUEST, 'minItems': 1, 'maxItems': 8}}, ['requests']), self._tool_batch_read,
-            minimum_mode='read-only', side_effects='none', concurrency='parallel',
+            minimum_mode='read-only', side_effects='none', concurrency='serial',
             retry_safe=True, cacheable=True, compact_observation=True, task_kinds=('inspect', 'code', 'all')))
 
         self.registry.register(ToolSpec(
             schema('batch_search', 'Run up to eight independent content searches in one call, in input order.',
            {'requests': {'type': 'array', 'items': SEARCH_REQUEST, 'minItems': 1, 'maxItems': 8}}, ['requests']), self._tool_batch_search,
-            minimum_mode='read-only', side_effects='none', concurrency='parallel',
+            minimum_mode='read-only', side_effects='none', concurrency='serial',
             retry_safe=True, cacheable=True, compact_observation=False, task_kinds=('inspect', 'code', 'all')))
 
         if self.mcp_client and self.mcp_client.is_connected:

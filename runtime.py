@@ -16,7 +16,11 @@ from process_orchestration import ProcessOrchestrator, validate_wait_seconds
 class Runtime:
     def __init__(self, model, workspace, state_dir, mode='read-only', mcp_client=None,
                  emit=None, budget=None, context_window=8192, trace=False, task_kind="auto",
-                 process_wait_seconds=2):
+                 process_wait_seconds=2, tool_workers=4):
+        if type(tool_workers) is not int or not 1 <= tool_workers <= 8:
+            raise ValueError('tool_workers must be between 1 and 8')
+        self.tool_workers = tool_workers
+        self._emit_lock = threading.RLock()
         self.process_wait_seconds = validate_wait_seconds(process_wait_seconds)
         self.model = model
         self.tools = WorkspaceTools(workspace, mcp_client=mcp_client, mode=mode)
@@ -33,12 +37,13 @@ class Runtime:
         self.task_kind = task_kind
 
     def emit(self, event):
-        self.sink(event)
-        if self.trace:
-            directory = self.tools.path('.local-coder/traces')
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            with (directory / (self.session_id + '.jsonl')).open('a') as f:
-                f.write(json.dumps(event) + '\n')
+        with self._emit_lock:
+            self.sink(event)
+            if self.trace:
+                directory = self.tools.path('.local-coder/traces')
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with (directory / (self.session_id + '.jsonl')).open('a') as f:
+                    f.write(json.dumps(event) + '\n')
 
     def resume(self, key):
         self.messages = self.store.load(key)
@@ -80,7 +85,7 @@ class Runtime:
                                budget=self.budget, cancel_event=self.cancel_event,
                                emit=self.emit, context_manager=self.context,
                                tool_schemas=self.tools.selected_schemas(self.task_kind),
-                               tool_executor=orchestrator, execution_context=orchestrator.context)
+                               tool_executor=orchestrator, execution_context=orchestrator.context, tool_workers=self.tool_workers)
             self.emit({'type': 'turn_result', **asdict(result)})
             return result
         finally:

@@ -223,7 +223,7 @@ Statuses distinguish successful observations, running processes, nonzero command
 
 Each native tool has one `ToolSpec` registration in `WorkspaceTools._register_tools`: its schema, handler, minimum permission mode, side effects, concurrency policy, observation-reuse policy, task categories, and optional timeout defaults/limits. Schemas returned to callers are independent snapshots. JSON Schema validators are compiled once per registration and reused by direct calls and the agent loop. The registry controls tool exposure, dispatch, argument validation, and the loop's cache invalidation; batch tools consult the child's concurrency policy before running reads in parallel.
 
-Known read-only MCP tools are registered separately with conservative scheduling metadata. They cannot shadow native tools or grant additional permissions. Unknown legacy clients remain supported, but receive conservative metadata rather than inferred permission to reuse or parallelize their calls. The registry prepares for broader scheduling; it does not yet parallelize arbitrary model-issued tool calls.
+Known read-only MCP tools are registered separately with conservative scheduling metadata. They cannot shadow native tools or grant additional permissions. Unknown legacy clients remain supported, but receive conservative metadata rather than inferred permission to reuse or parallelize their calls. The scheduler uses this metadata to parallelize only explicitly eligible independent reads.
 
 ### Runtime-managed command waiting
 
@@ -231,7 +231,7 @@ The CLI and MCP runtime wait up to 2 seconds for each `run_command`, `bash`, or 
 
 Use `--process-wait-seconds 0` on `ask`, `chat`, or `edit` to retain immediate handles, or choose a wait interval up to 30 seconds. MCP hosts can set `LOCAL_CODER_PROCESS_WAIT_SECONDS` at server launch. The runtime emits incremental `process_output` events while waiting, and the CLI displays them. Terminal output remains capped at 32,000 bytes; missing output is marked as truncated.
 
-Waiting respects the remaining run deadline and cancellation signal. Cancellation or budget exhaustion cleans up outstanding process groups, including jobs that outlasted an earlier wait interval; closing the runtime also stops them. Native command timeouts still apply. A successful model response can still leave a command running inside an open chat runtime, so a process handle alone is not evidence that a check passed. This milestone does not add general tool retries, arbitrary concurrent scheduling, or interruptible embedded inference.
+Waiting respects the remaining run deadline and cancellation signal. Cancellation or budget exhaustion cleans up outstanding process groups, including jobs that outlasted an earlier wait interval; closing the runtime also stops them. Native command timeouts still apply. A successful model response can still leave a command running inside an open chat runtime, so a process handle alone is not evidence that a check passed. This process waiting policy does not make embedded inference forcibly interruptible.
 
 ### Shared execution deadlines
 
@@ -244,3 +244,9 @@ Python file/DNS operations and connecting sockets retain platform interruption l
 Explicitly retry-safe reads can retry transient failures at most twice, with short exponential backoff inside the shared run budget. Retry events and attempt counts are observable. Commands, edits, permission failures, invalid arguments, and stale patches are never blindly retried; a stale patch returns `stale_patch` so the model can reread and repair its arguments. HTTP status errors distinguish retryable throttling/server failures from access denials.
 
 The loop detects repeated semantic observations and short cycles without progress and returns `blocked` with reason `no_progress`. Live process observations are exempt: silent commands remain bounded by their timeouts and the run deadline, rather than being mistaken for a stuck model.
+
+### Concurrent read scheduling
+
+Adjacent independent read/search/web calls marked parallel-safe execute with at most four workers by default; model tool results retain the original call order. Identical cacheable observations share one execution. Serial tools and mutations drain the preceding read group before executing, invalidate stale observation caches, and finish before subsequent reads begin. Batch tools own their existing bounded worker pool and are serial in the outer scheduler to avoid nested worker multiplication. Unknown MCP/legacy tools remain serial.
+
+Set `--tool-workers` on `ask`, `chat`, or `edit` (1–8), or `LOCAL_CODER_TOOL_WORKERS` at MCP launch. One worker preserves serial read execution. Output events may arrive in execution order, while transcript results remain in call order. Cancellation and validation apply to each scheduled operation.
