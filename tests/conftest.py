@@ -76,6 +76,11 @@ def mock_mcp_client():
         for name in ("read_file", "list_directory")
     ]
     client.call_tool.return_value = "tool result"
+    from tool_registry import ToolRegistry, ToolSpec
+    client.registry = ToolRegistry()
+    for definition in client.get_openai_tool_schemas.return_value:
+        client.registry.register(ToolSpec(definition, handler=None, side_effects='none',
+                                         cacheable=True, compact_observation=True))
     return client
 
 

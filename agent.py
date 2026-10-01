@@ -5,9 +5,10 @@ import re
 import time
 from typing import Literal
 
-from jsonschema import validate, ValidationError
+from jsonschema import ValidationError
 from session import ContextManager
 from tool_result import ToolResult, invoke_tool
+from tool_registry import ToolRegistry, ToolSpec
 
 MAX_AGENT_ITERATIONS = 10
 
@@ -53,8 +54,13 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     if isinstance(llm, ModelAdapter) and not llm.profile.get("supports_tools", True):
         schemas = []
     schemas = sorted(schemas, key=lambda s: s['function']['name'])
-    registered = {s['function']['name']: s['function'].get('parameters', {'type': 'object'})
-                  for s in schemas}
+    registered = {s['function']['name'] for s in schemas}
+    registry = getattr(mcp_client, 'registry', None)
+    if not isinstance(registry, ToolRegistry):
+        # Unknown external tools retain conservative execution metadata.
+        registry = ToolRegistry()
+        for definition in schemas:
+            registry.register(ToolSpec(definition, handler=None))
     context_manager = context_manager or ContextManager(window=32768)
     started, generated, failures, steps = time.monotonic(), 0, {}, 0
 
@@ -156,19 +162,19 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 if name not in registered:
                     raise ValueError(f'Unknown or unavailable tool: {name}')
                 args = json.loads(raw) if isinstance(raw, str) else raw
-                validate(args, registered[name])
+                registry.validate(name, args)
                 phase = time.monotonic()
                 metrics['tool_calls'] += 1
                 cache_key = json.dumps([name, args], sort_keys=True)
-                read_names = {'read_file', 'search_code', 'list_directory', 'batch_read', 'batch_search'}
-                if name in read_names and cache_key in read_cache:
+                spec = registry.get(name)
+                if spec.cacheable and cache_key in read_cache:
                     tool_result = read_cache[cache_key]
                     emit({'type': 'tool_reused', 'name': name, 'call_id': call['id']})
                 else:
                     tool_result = invoke_tool(mcp_client, name, args)
-                    if name in read_names and not tool_result.is_error:
+                    if spec.cacheable and tool_result.status == 'success':
                         read_cache[cache_key] = tool_result
-                    if name not in read_names:
+                    if spec.side_effects != 'none':
                         read_cache.clear()
                 metrics['tool_seconds'] += time.monotonic() - phase
             except (ValueError, TypeError, ValidationError) as exc:
@@ -181,7 +187,8 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             # Retain one full identical observation in the active transcript.
             # Fresh execution across steps observes external edits before deduplication.
             original_output = json.dumps(tool_result.data, sort_keys=True)
-            if name in ('read_file', 'list_directory', 'batch_read') and not tool_result.is_error:
+            spec = registry.get(name)
+            if spec and spec.compact_observation and tool_result.status == 'success':
                 observation_key = json.dumps([name, args], sort_keys=True)
                 previous = observations.get(observation_key)
                 if previous and previous[1] == original_output and any(m.get('tool_call_id') == previous[0] for m in messages):
