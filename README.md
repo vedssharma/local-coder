@@ -67,6 +67,15 @@ For example, the agent can call `bash` with `{"command": "python -m pytest -q", 
 
 Native tools work without Node. `--mcp` adds known read-only tools from `@modelcontextprotocol/server-filesystem`; `--no-mcp` is the default. Arbitrary MCP tools and MCP mutation tools are not exposed. Repository instructions and tool output cannot elevate the selected mode.
 
+The native `web_search` and `web_fetch` tools are available in all permission modes for inspection and coding tasks. `--task-kind answer` still disables all tools. They work through the shared runtime in both the CLI and MCP server, with no extra Python dependencies.
+
+- `web_search`: accepts `query`, optional `max_results` (1–10, default 5), and `timeout_seconds` (1–30, default 20). Returns source URLs, titles, snippets, and the provider name. It uses DuckDuckGo's HTML search by default. Set `BRAVE_SEARCH_API_KEY` in the harness process environment to use the Brave Search API instead; the key is not passed in model tool arguments or returned in results. Queries are sent to the selected search provider. Provider errors and bot challenges are reported as errors, not invented results.
+- `web_fetch`: accepts `url`, optional `max_chars` (100–50,000, default 12,000), and `timeout_seconds` (1–30, default 20). Returns the final URL, HTTP status, content type, title, extracted text, and a truncation flag. HTML scripts and styles are removed; plain text, JSON, and XML are supported. It reads at most 1 MB per response. JavaScript rendering, authenticated browsing, PDFs, and binary downloads are not supported.
+
+For example, ask `python main.py ask "Search the web for the latest Python asyncio documentation and cite the source URLs"`, or let the model call `web_fetch` with `{"url": "https://docs.python.org/3/library/asyncio.html"}`. Web output is marked as untrusted content, and the system prompt directs the model to use it as evidence rather than instructions.
+
+Only public HTTP(S) URLs on standard ports are supported; embedded URL credentials and local/private IP literals are rejected. Direct requests validate destination DNS addresses, including redirects. When an HTTP proxy is configured, hostname resolution and destination access use that proxy's policy; these checks are not an OS network sandbox. The client preserves inherited proxies and TLS certificate verification. Restricted environments must allow the search provider (`html.duckduckgo.com`, or `api.search.brave.com`) and the sites being fetched. A blocked destination requires an environment policy change; the tools do not bypass it.
+
 Permission modes:
 
 | Mode | Read/search/diff | Targeted patches | Arbitrary commands |
