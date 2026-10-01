@@ -231,7 +231,7 @@ class TestRunAgentLoop:
             mock_llm, messages, mock_console, max_tokens=64, mcp_client=disconnected
         )
         tool_msgs = [m for m in messages if m.get("role") == "tool"]
-        assert any("Error" in m["content"] for m in tool_msgs)
+        assert any(json.loads(m["content"])["error_code"] == "invalid_arguments" for m in tool_msgs)
 
     def test_inline_tool_call_fallback_parsed(self, mock_llm, mock_mcp_client, mock_console):
         """If the LLM embeds the tool call in content instead of tool_calls, it is parsed."""

@@ -26,3 +26,5 @@ Launch from the project to work on; the server resolves its own Python imports s
 To smoke-test transport, connect an MCP client, initialize the session, list tools, and call `get_model`. This tests discovery/configuration, not model inference. Running the script directly waits for MCP JSON-RPC on stdin.
 
 Coding tools accept an optional `profile` naming an existing saved model configuration. The server keeps one model loaded at a time, releases it on profile changes, and uses that profile’s context limit. Profile selection never changes executor permissions.
+
+Set `LOCAL_CODER_PROCESS_WAIT_SECONDS` at launch to control runtime-managed command waiting (default 2 seconds, range 0–30). Zero returns command handles immediately. The runtime polls during the wait without additional model calls; long jobs still return handles for explicit polling or cancellation.

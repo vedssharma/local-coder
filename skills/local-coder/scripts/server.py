@@ -42,7 +42,8 @@ def run_turn(prompt, files=None, session_id=None, max_tokens=512, profile_name=N
     with _lock:
         with Runtime(get_model_instance(profile_name), os.getcwd(), config.CONFIG_DIR,
                      mode=os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only'),
-                     context_window=config.get_model_config(profile_name)['n_ctx']) as runtime:
+                     context_window=config.get_model_config(profile_name)['n_ctx'],
+                     process_wait_seconds=float(os.environ.get('LOCAL_CODER_PROCESS_WAIT_SECONDS', '2'))) as runtime:
             if session_id:
                 runtime.resume(session_id)
             original, contents = parse_file_references(prompt, root=runtime.tools.root)

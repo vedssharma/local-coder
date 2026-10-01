@@ -11,6 +11,8 @@ session alive across multiple tool calls.
 import asyncio
 import os
 import threading
+import time
+from tool_result import ToolResult
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession, StdioServerParameters
@@ -152,32 +154,30 @@ class MCPClient:
         Returns:
             Result text as a string.
         """
+        return self.execute_tool(name, arguments).to_legacy()
+
+    def execute_tool(self, name, arguments):
+        started = time.monotonic()
         if not self._connected or not self._loop:
-            return f"Error: MCP client is not connected"
+            return ToolResult.error('disconnected', 'MCP client is not connected')
+        future = asyncio.run_coroutine_threadsafe(self._execute_tool_async(name, arguments), self._loop)
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._call_tool_async(name, arguments), self._loop
-            )
-            return future.result(timeout=30)
-        except Exception as e:
-            return f"Error calling MCP tool '{name}': {e}"
+            result = future.result(timeout=30)
+        except TimeoutError:
+            future.cancel()
+            result = ToolResult.error('tool_timeout', 'MCP tool timed out', retryable=True)
+        except Exception as exc:
+            result = ToolResult.error('mcp_error', exc)
+        result.duration_seconds = time.monotonic() - started
+        return result
 
     async def _call_tool_async(self, name, arguments):
+        return (await self._execute_tool_async(name, arguments)).to_legacy()
+
+    async def _execute_tool_async(self, name, arguments):
         result = await self._session.call_tool(name, arguments)
-
-        if getattr(result, "isError", False):
-            # Extract error message from content blocks
-            error_parts = []
-            for block in result.content:
-                if hasattr(block, "text"):
-                    error_parts.append(block.text)
-            return f"Error: {' '.join(error_parts) or 'unknown MCP error'}"
-
-        # MCP returns a list of content blocks; concatenate text parts
-        parts = []
-        for block in result.content:
-            if hasattr(block, "text"):
-                parts.append(block.text)
-            else:
-                parts.append(str(block))
-        return "\n".join(parts) or "(empty result)"
+        parts = [block.text if hasattr(block, 'text') else str(block) for block in result.content]
+        text = '\n'.join(parts) or '(empty result)'
+        if getattr(result, 'isError', False):
+            return ToolResult.error('mcp_tool_error', '\n'.join(parts) or 'unknown MCP error')
+        return ToolResult(data=text)

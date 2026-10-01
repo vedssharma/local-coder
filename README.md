@@ -212,3 +212,23 @@ python main.py models --speculative-mode off
 These modes use llama-cpp-python's target-verified draft callback. Prompt lookup is useful only when the prompt contains matching continuations. Learned drafts must match tokenizer metadata, vocabulary/token IDs, and tokenization checks; incompatible models are rejected and released. Both models must fit in memory; speculative decoding also enables additional target logits storage and can be slower than the baseline. The draft defaults to CPU; `--draft-gpu-layers` controls its offload independently. No draft is loaded unless explicitly enabled. External-server speculation must be configured using that server's supported startup options; this client does not send invented portable draft parameters.
 
 Use named baseline/speculative profiles with `benchmark --compare`, then compare coding evaluations. Native throughput describes native target evaluation; `end_to_end_completion_tokens_per_second` includes full request time (including draft work, prefill, and loading where applicable). This distinction matters for speculative decoding. `benchmark --persistent` measures the private daemon; multi-profile comparisons require non-persistent inference or explicit daemon restarts. Real model measurements remain necessary before claiming a speedup.
+
+### Structured tool outcomes
+
+The agent consumes `ToolResult` objects through `execute_tool`; the existing `call_tool` string API remains a compatibility wrapper. Model tool messages are JSON envelopes containing `status`, `data`, `error_code`, `error_message`, `retryable`, `duration_seconds`, and `artifacts`. Large payloads are bounded without truncating the JSON envelope or its status, and the full payload is retained as an artifact when possible.
+
+Statuses distinguish successful observations, running processes, nonzero command exits (`failed` / `command_failed`), launch or validation errors (`error`), timeouts, and cancellation. Native and MCP tools report errors structurally; ordinary content beginning with `Error:` remains successful data. Batch results include each child's structured outcome. `tool_finished` events include both the model-facing output and the structured result. Retryability is metadata only; no automatic retries have been added.
+
+### Tool registry
+
+Each native tool has one `ToolSpec` registration in `WorkspaceTools._register_tools`: its schema, handler, minimum permission mode, side effects, concurrency policy, observation-reuse policy, task categories, and optional timeout defaults/limits. Schemas returned to callers are independent snapshots. JSON Schema validators are compiled once per registration and reused by direct calls and the agent loop. The registry controls tool exposure, dispatch, argument validation, and the loop's cache invalidation; batch tools consult the child's concurrency policy before running reads in parallel.
+
+Known read-only MCP tools are registered separately with conservative scheduling metadata. They cannot shadow native tools or grant additional permissions. Unknown legacy clients remain supported, but receive conservative metadata rather than inferred permission to reuse or parallelize their calls. The registry prepares for broader scheduling; it does not yet parallelize arbitrary model-issued tool calls.
+
+### Runtime-managed command waiting
+
+The CLI and MCP runtime wait up to 2 seconds for each `run_command`, `bash`, or explicit `poll_process` observation, polling locally without additional inference calls. Commands that finish during that interval return their final structured outcome. Longer jobs return `status: running` with a process handle; the model can explicitly poll again or cancel. Direct `WorkspaceTools.call_tool`/`execute_tool` calls still return handles immediately.
+
+Use `--process-wait-seconds 0` on `ask`, `chat`, or `edit` to retain immediate handles, or choose a wait interval up to 30 seconds. MCP hosts can set `LOCAL_CODER_PROCESS_WAIT_SECONDS` at server launch. The runtime emits incremental `process_output` events while waiting, and the CLI displays them. Terminal output remains capped at 32,000 bytes; missing output is marked as truncated.
+
+Waiting respects the remaining run deadline and cancellation signal. Cancellation or budget exhaustion cleans up outstanding process groups, including jobs that outlasted an earlier wait interval; closing the runtime also stops them. Native command timeouts still apply. A successful model response can still leave a command running inside an open chat runtime, so a process handle alone is not evidence that a check passed. This milestone does not add general tool retries, arbitrary concurrent scheduling, or interruptible embedded inference.
