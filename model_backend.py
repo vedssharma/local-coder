@@ -12,6 +12,19 @@ KV_TYPES = ('f16', 'q8_0', 'q4_0')
 
 
 def validate_tuning(profile):
+    mode = profile.get('speculative_mode', 'off')
+    if mode not in ('off', 'prompt-lookup', 'draft-model'):
+        raise ValueError('speculative_mode must be off, prompt-lookup, or draft-model')
+    for key, limit in (('draft_tokens', 32), ('draft_ngram_size', 8)):
+        value = profile.get(key, 8 if key == 'draft_tokens' else 2)
+        if type(value) is not int or not 1 <= value <= limit:
+            raise ValueError(f'{key} must be between 1 and {limit}')
+    if mode != 'off' and profile.get('backend', 'embedded') != 'embedded':
+        raise ValueError('Configure speculative decoding on the external server; these options are embedded-only')
+    if mode == 'draft-model' and not isinstance(profile.get('draft_model_path'), str):
+        raise ValueError('draft-model mode requires draft_model_path')
+    if type(profile.get('draft_n_gpu_layers', 0)) is not int or profile.get('draft_n_gpu_layers', 0) < -1:
+        raise ValueError('draft_n_gpu_layers must be -1 or a nonnegative integer')
     if type(profile.get('prompt_cache_mb', 0)) is not int or not 0 <= profile.get('prompt_cache_mb', 0) <= 4096:
         raise ValueError('prompt_cache_mb must be between 0 and 4096')
     if 'server_cache_prompt' in profile and type(profile['server_cache_prompt']) is not bool:
@@ -57,7 +70,9 @@ class ModelAdapter:
                    'time_to_first_output_seconds': self._first_output - started if self._first_output else None,
                    'prompt_tokens': usage.get('prompt_tokens'), 'completion_tokens': usage.get('completion_tokens'),
                    'cached_prompt_tokens': (usage.get('prompt_tokens_details') or {}).get('cached_tokens'),
-                   'prompt_tokens_per_second': None, 'generation_tokens_per_second': None}
+                   'prompt_tokens_per_second': None, 'generation_tokens_per_second': None,
+                   'end_to_end_completion_tokens_per_second': usage.get('completion_tokens') / elapsed
+                       if type(usage.get('completion_tokens')) is int and elapsed > 0 else None}
         metrics.update(self.backend_metrics())
         response['performance'] = metrics
         self.emit({'type': 'inference_metrics', **metrics})
@@ -109,6 +124,7 @@ class EmbeddedModel(ModelAdapter):
         super().__init__(profile)
         self._model = None
         self._lock = threading.RLock()
+        self._draft = None
 
     def load(self):
         if self._model is None:
@@ -116,19 +132,43 @@ class EmbeddedModel(ModelAdapter):
             kwargs = {key: self.profile[key] for key in ('model_path', 'n_ctx', 'n_gpu_layers')}
             if self.profile.get('chat_format'):
                 kwargs['chat_format'] = self.profile['chat_format']
-            kwargs.update({k: self.profile[k] for k in TUNING_INTS + ('flash_attn',) if k in self.profile})
+            kwargs.update({k: self.profile[k] for k in TUNING_INTS + ('flash_attn',) if self.profile.get(k) is not None})
             if 'n_batch' in kwargs and 'n_ubatch' not in kwargs:
                 kwargs['n_ubatch'] = min(kwargs['n_batch'], 512)
             from llama_cpp import llama_cpp
             for key in ('type_k', 'type_v'):
-                if key in self.profile:
+                if self.profile.get(key) is not None:
                     kwargs[key] = getattr(llama_cpp, 'GGML_TYPE_' + self.profile[key].upper())
             kwargs['no_perf'] = False
             started = time.perf_counter()
-            self._model = Llama(**kwargs, verbose=False)
-            if self.profile.get('prompt_cache_mb', 0):
-                from llama_cpp import LlamaRAMCache
-                self._model.set_cache(LlamaRAMCache(capacity_bytes=self.profile['prompt_cache_mb'] * 1024 * 1024))
+            mode = self.profile.get('speculative_mode', 'off')
+            if mode == 'prompt-lookup':
+                from llama_cpp.llama_speculative import LlamaPromptLookupDecoding
+                kwargs['draft_model'] = LlamaPromptLookupDecoding(
+                    max_ngram_size=self.profile.get('draft_ngram_size', 2),
+                    num_pred_tokens=self.profile.get('draft_tokens', 8))
+            elif mode == 'draft-model':
+                from speculative import SmallModelDraft
+                draft = Llama(model_path=self.profile['draft_model_path'], n_ctx=self.profile['n_ctx'],
+                              n_gpu_layers=self.profile.get('draft_n_gpu_layers', 0),
+                              n_threads=self.profile.get('n_threads'), verbose=False)
+                self._draft = SmallModelDraft(draft, self.profile.get('draft_tokens', 8))
+                kwargs['draft_model'] = self._draft
+            try:
+                self._model = Llama(**kwargs, verbose=False)
+                if self._draft:
+                    self._draft.verify(self._model)
+                if self.profile.get('prompt_cache_mb', 0):
+                    from llama_cpp import LlamaRAMCache
+                    self._model.set_cache(LlamaRAMCache(capacity_bytes=self.profile['prompt_cache_mb'] * 1024 * 1024))
+            except Exception:
+                if self._model is not None:
+                    self._model.close()
+                    self._model = None
+                if self._draft:
+                    self._draft.close()
+                    self._draft = None
+                raise
             self.load_seconds += time.perf_counter() - started
             self.emit({'type': 'model_loaded', 'load_seconds': self.load_seconds})
         return self._model
@@ -154,6 +194,9 @@ class EmbeddedModel(ModelAdapter):
             if self._model is not None:
                 self._model.close()
                 self._model = None
+            if self._draft is not None:
+                self._draft.close()
+                self._draft = None
 
     def backend_metrics(self):
         try:

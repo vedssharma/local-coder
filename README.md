@@ -184,3 +184,20 @@ python evaluations/run.py --profile small --allow-execution --output /tmp/small-
 ```
 
 `--profile` overrides routing. Routes are used only with `--route` and choose a model once at task startup; there is no hidden difficulty classifier or mid-turn model swap. Without routing, the active profile (or the base `default`) is used. `profiles use default` restores the base configuration; `profiles route code default` clears that route. Subsequent `models` changes update the active named profile while preserving other profiles. Named snapshots do not inherit later base tuning changes. Comparisons run sequentially, release each model, and record settings and raw samples. Compare coding success as well as latency before choosing a smaller/quantized model. A private daemon retains one profile at a time and requires stop/restart when switching.
+
+### Speculative decoding
+
+```bash
+# Reuse matching text sequences from the prompt; no second model required.
+python main.py models --speculative-mode prompt-lookup --draft-tokens 8 --draft-ngram-size 2
+
+# Use a compatible smaller GGUF as a learned draft.
+python main.py models --speculative-mode draft-model --draft-model /path/to/draft.gguf --draft-tokens 8
+
+# Disable and compare against the baseline.
+python main.py models --speculative-mode off
+```
+
+These modes use llama-cpp-python's target-verified draft callback. Prompt lookup is useful only when the prompt contains matching continuations. Learned drafts must match tokenizer metadata, vocabulary/token IDs, and tokenization checks; incompatible models are rejected and released. Both models must fit in memory; speculative decoding also enables additional target logits storage and can be slower than the baseline. The draft defaults to CPU; `--draft-gpu-layers` controls its offload independently. No draft is loaded unless explicitly enabled. External-server speculation must be configured using that server's supported startup options; this client does not send invented portable draft parameters.
+
+Use named baseline/speculative profiles with `benchmark --compare`, then compare coding evaluations. Native throughput describes native target evaluation; `end_to_end_completion_tokens_per_second` includes full request time (including draft work, prefill, and loading where applicable). This distinction matters for speculative decoding. `benchmark --persistent` measures the private daemon; multi-profile comparisons require non-persistent inference or explicit daemon restarts. Real model measurements remain necessary before claiming a speedup.

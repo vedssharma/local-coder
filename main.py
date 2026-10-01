@@ -367,6 +367,11 @@ def models(
     value_cache_type: str = typer.Option(None, '--value-cache-type'),
     prompt_cache_mb: int = typer.Option(None, '--prompt-cache-mb', min=0, max=4096),
     server_cache_prompt: bool = typer.Option(None, '--server-cache-prompt/--no-server-cache-prompt'),
+    speculative_mode: str = typer.Option(None, '--speculative-mode'),
+    draft_model_path: str = typer.Option(None, '--draft-model'),
+    draft_tokens: int = typer.Option(None, '--draft-tokens', min=1, max=32),
+    draft_ngram_size: int = typer.Option(None, '--draft-ngram-size', min=1, max=8),
+    draft_gpu_layers: int = typer.Option(None, '--draft-gpu-layers', min=-1),
 ):
     """Show current model or set a new model."""
     global llm
@@ -376,7 +381,10 @@ def models(
                'n_threads': threads, 'n_threads_batch': batch_threads, 'n_batch': batch_size,
                'n_ubatch': micro_batch_size, 'flash_attn': flash_attention,
                'type_k': key_cache_type, 'type_v': value_cache_type,
-               'prompt_cache_mb': prompt_cache_mb, 'server_cache_prompt': server_cache_prompt}
+               'prompt_cache_mb': prompt_cache_mb, 'server_cache_prompt': server_cache_prompt,
+               'speculative_mode': speculative_mode, 'draft_model_path': draft_model_path,
+               'draft_tokens': draft_tokens, 'draft_ngram_size': draft_ngram_size,
+               'draft_n_gpu_layers': draft_gpu_layers}
     updates = {k: v for k, v in updates.items() if v is not None}
     if updates:
         profile = {**config.get_model_config(), **updates}
@@ -445,21 +453,29 @@ def benchmark(
     max_tokens: int = typer.Option(128, min=1),
     profile_name: str = typer.Option(None, '--profile'),
     compare: list[str] = typer.Option(None, '--compare'),
+    persistent: bool = typer.Option(False, '--persistent'),
 ):
     """Measure real configured inference; missing models/errors never count as passes."""
     from performance import benchmark as measure
     import json
     from pathlib import Path
     try:
+        if compare and persistent:
+            raise ValueError('Persistent inference holds one profile; compare without --persistent')
         names = compare or [profile_name]
         reports = []
         for name in names:
             profile = config.get_model_config(name)
-            model = create_model(profile)
+            if persistent:
+                from inference_daemon import PersistentModel
+                model = PersistentModel(profile, config.CONFIG_DIR)
+            else:
+                model = create_model(profile)
             try:
                 report = measure(model, prompt, repeats, warmups, max_tokens)
                 safe_keys = ('backend', 'model', 'model_path', 'n_ctx', 'n_threads', 'n_threads_batch',
-                             'n_batch', 'n_ubatch', 'type_k', 'type_v', 'flash_attn', 'prompt_cache_mb')
+                             'n_batch', 'n_ubatch', 'type_k', 'type_v', 'flash_attn', 'prompt_cache_mb',
+                             'speculative_mode', 'draft_model_path', 'draft_tokens', 'draft_ngram_size', 'draft_n_gpu_layers')
                 report['profile'] = name or config.load_config().get('active_profile', 'default')
                 report['settings'] = {key: profile[key] for key in safe_keys if key in profile}
                 reports.append(report)

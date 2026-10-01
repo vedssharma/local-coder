@@ -22,5 +22,6 @@ def benchmark(model, prompt, repeats=3, warmups=1, max_tokens=128):
         return statistics.median(values) if values else None
     return {'version': 1, 'warmups': warmups, 'repeats': repeats, 'samples': samples,
             'median': {key: median(key) for key in ('elapsed_seconds', 'load_seconds',
-                'time_to_first_output_seconds', 'prompt_tokens_per_second', 'generation_tokens_per_second')},
+                'time_to_first_output_seconds', 'prompt_tokens_per_second', 'generation_tokens_per_second',
+                'end_to_end_completion_tokens_per_second')},
             'all_completed': all(s['completed'] for s in samples)}

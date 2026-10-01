@@ -36,3 +36,21 @@ def test_two_cli_processes_reuse_one_daemon_and_profile_mismatch_is_rejected(tmp
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_autostart_reports_missing_model_and_can_be_stopped():
+    import tempfile
+    import time
+    with tempfile.TemporaryDirectory(prefix='lc-daemon-') as state:
+        client = PersistentModel({'backend': 'embedded', 'model_path': '/nonexistent-draft-test-model.gguf',
+                                  'n_ctx': 1024, 'n_gpu_layers': 0}, state)
+        try:
+            with pytest.raises(ValueError, match='does not exist'):
+                client.count_tokens('hello')
+        finally:
+            if client.socket_path.exists():
+                client.stop()
+                deadline = time.monotonic() + 5
+                while client.socket_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert not client.socket_path.exists()

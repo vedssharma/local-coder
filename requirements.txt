@@ -1,5 +1,6 @@
 typer
-llama-cpp-python
+llama-cpp-python>=0.3.35
 rich
 mcp>=1.30,<2
 jsonschema
+numpy

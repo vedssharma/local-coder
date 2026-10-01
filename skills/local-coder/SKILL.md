@@ -18,3 +18,5 @@ The host explicitly selects `LOCAL_CODER_PERMISSION_MODE` at launch: `read-only`
 Coding responses contain `status`, `text`, and `session_id`. Check status before using the response. `completed` denotes a completed model turn; inspect actual test results before claiming changes work. Preserve `session_id` to continue work, including after server restart. Inline JSON examples are never automatically executed as tool calls.
 
 File references in `@path` form and explicit `files` are confined to the workspace. Embedded inference stays local; a server backend sends context to its configured endpoint.
+
+Use the optional `profile` argument on coding tools to select a saved named model. Check inference benchmarks and coding evaluations before choosing a smaller model for a task.

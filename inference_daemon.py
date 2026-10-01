@@ -21,6 +21,8 @@ def normalized_profile(profile):
     result = dict(profile)
     if result.get('backend', 'embedded') == 'embedded' and 'model_path' in result:
         result['model_path'] = str(Path(result['model_path']).resolve())
+        if result.get('draft_model_path'):
+            result['draft_model_path'] = str(Path(result['draft_model_path']).resolve())
     return result
 
 
@@ -181,6 +183,7 @@ class PersistentModel(ModelAdapter):
     def backend_metrics(self):
         metrics = getattr(self, '_server_performance', {})
         return {**{key: metrics.get(key) for key in ('prompt_tokens_per_second', 'generation_tokens_per_second', 'cached_prompt_tokens')},
+                'load_seconds': metrics.get('load_seconds', 0),
                 'server_load_seconds': metrics.get('load_seconds'), 'server_elapsed_seconds': metrics.get('elapsed_seconds')}
 
     def stop(self):
