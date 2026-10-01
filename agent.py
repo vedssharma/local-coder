@@ -11,6 +11,7 @@ from tool_result import ToolResult, invoke_tool
 from tool_registry import ToolRegistry, ToolSpec
 from execution_context import ExecutionContext, ExecutionCancelled, DeadlineExceeded
 import threading
+from tool_recovery import execute_with_recovery, ProgressTracker
 
 MAX_AGENT_ITERATIONS = 10
 
@@ -71,6 +72,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     if isinstance(llm, ModelAdapter):
         llm.execution_context = execution_context
 
+    progress = ProgressTracker()
     observations = {}
     metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0}
 
@@ -146,6 +148,8 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         for call in calls:
             if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
                 return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
+            if not isinstance(call['function'].get('name'), str):
+                return finish('blocked', 'Model returned an invalid tool name.', 'invalid_protocol')
             key = call.get('id') or f'call_{step}_{len(ids)}'
             if not isinstance(key, str):
                 return finish('blocked', 'Model returned an invalid tool call ID.', 'invalid_protocol')
@@ -161,6 +165,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         for call in calls:
             name = call['function'].get('name')
             raw = call['function'].get('arguments')
+            args = raw
             emit({'type': 'tool_started', 'name': name, 'call_id': call['id']})
             try:
                 if halt:
@@ -181,7 +186,9 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                     emit({'type': 'tool_reused', 'name': name, 'call_id': call['id']})
                 else:
                     with execution_context.bind():
-                        tool_result = tool_executor(name, args) if tool_executor else invoke_tool(mcp_client, name, args)
+                        tool_result = execute_with_recovery(spec,
+                            lambda: tool_executor(name, args) if tool_executor else invoke_tool(mcp_client, name, args),
+                            execution_context, emit)
                     if spec.cacheable and tool_result.status == 'success':
                         read_cache[cache_key] = tool_result
                     if spec.side_effects != 'none':
@@ -201,6 +208,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 tool_result = ToolResult.error('execution_error', exc)
             # Retain one full identical observation in the active transcript.
             # Fresh execution across steps observes external edits before deduplication.
+            no_progress = progress.observe(name, args, tool_result)
             original_output = json.dumps(tool_result.data, sort_keys=True)
             spec = registry.get(name)
             if spec and spec.compact_observation and tool_result.status == 'success':
@@ -214,6 +222,8 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': output})
             emit({'type': 'tool_finished', 'name': name, 'call_id': call['id'], 'output': output, 'result': tool_result.to_dict()})
             fingerprint = json.dumps([name, raw], sort_keys=True)
+            if no_progress and not halt:
+                halt = finish('blocked', 'Repeated tool calls are making no observable progress.', 'no_progress')
             if tool_result.is_error:
                 failures[fingerprint] = failures.get(fingerprint, 0) + 1
                 if failures[fingerprint] >= 3:

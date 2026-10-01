@@ -13,6 +13,7 @@ class ToolResult:
     retryable: bool = False
     duration_seconds: float = 0.0
     artifacts: list[str] = field(default_factory=list)
+    attempts: int = 1
 
     @property
     def is_error(self):

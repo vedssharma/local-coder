@@ -217,7 +217,7 @@ Use named baseline/speculative profiles with `benchmark --compare`, then compare
 
 The agent consumes `ToolResult` objects through `execute_tool`; the existing `call_tool` string API remains a compatibility wrapper. Model tool messages are JSON envelopes containing `status`, `data`, `error_code`, `error_message`, `retryable`, `duration_seconds`, and `artifacts`. Large payloads are bounded without truncating the JSON envelope or its status, and the full payload is retained as an artifact when possible.
 
-Statuses distinguish successful observations, running processes, nonzero command exits (`failed` / `command_failed`), launch or validation errors (`error`), timeouts, and cancellation. Native and MCP tools report errors structurally; ordinary content beginning with `Error:` remains successful data. Batch results include each child's structured outcome. `tool_finished` events include both the model-facing output and the structured result. Retryability is metadata only; no automatic retries have been added.
+Statuses distinguish successful observations, running processes, nonzero command exits (`failed` / `command_failed`), launch or validation errors (`error`), timeouts, and cancellation. Native and MCP tools report errors structurally; ordinary content beginning with `Error:` remains successful data. Batch results include each child's structured outcome. `tool_finished` events include both the model-facing output and the structured result. Retryability is consumed only by the bounded retry policy for explicitly safe reads.
 
 ### Tool registry
 
@@ -238,3 +238,9 @@ Waiting respects the remaining run deadline and cancellation signal. Cancellatio
 A run now supplies one `ExecutionContext` to the model adapter and native/MCP tools. Command timers, HTTP request timeouts, and MCP waits are capped by the remaining run budget. Cancellation is checked before dispatch, during native capture/batch work, between streamed model chunks, and while waiting for active HTTP or daemon sockets. Active socket reads are interrupted by shutting down the connection; cancellation prevents subsequent mutations from starting.
 
 Python file/DNS operations and connecting sockets retain platform interruption limits. Embedded llama.cpp calls cannot be forcibly interrupted inside a native generation step; persistent daemon clients can disconnect, but that does not forcibly terminate the server's native generation. Execute mode still uses host privileges.
+
+### Recovery and progress detection
+
+Explicitly retry-safe reads can retry transient failures at most twice, with short exponential backoff inside the shared run budget. Retry events and attempt counts are observable. Commands, edits, permission failures, invalid arguments, and stale patches are never blindly retried; a stale patch returns `stale_patch` so the model can reread and repair its arguments. HTTP status errors distinguish retryable throttling/server failures from access denials.
+
+The loop detects repeated semantic observations and short cycles without progress and returns `blocked` with reason `no_progress`. Live process observations are exempt: silent commands remain bounded by their timeouts and the run deadline, rather than being mistaken for a stuck model.

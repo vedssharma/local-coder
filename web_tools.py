@@ -16,6 +16,12 @@ from execution_context import CURRENT_CONTEXT
 MAX_BYTES = 1_000_000
 
 
+class WebRequestError(ValueError):
+    def __init__(self, message, code, retryable=False):
+        super().__init__(message)
+        self.code, self.retryable = code, retryable
+
+
 def public_url(url):
     if not isinstance(url, str) or len(url) > 8192 or any(c.isspace() for c in url):
         raise ValueError('Use a valid HTTP(S) URL without whitespace')
@@ -79,9 +85,11 @@ def retrieve(url, timeout_seconds=20, headers=None):
                     'body': body,
                     'truncated': len(data) > MAX_BYTES}
     except HTTPError as exc:
-        raise ValueError(f'Web request returned HTTP {exc.code}; check destination access and provider availability') from None
+        raise WebRequestError(f'Web request returned HTTP {exc.code}; check destination access and provider availability',
+                              f'http_{exc.code}', exc.code in (408, 429, 500, 502, 503, 504)) from None
     except URLError as exc:
-        raise ValueError(f'Web request failed: {exc.reason}') from None
+        raise WebRequestError(f'Web request failed: {exc.reason}', 'network_error',
+                              '403' not in str(exc.reason)) from None
 
 
 class PageParser(HTMLParser):
