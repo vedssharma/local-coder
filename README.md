@@ -139,3 +139,15 @@ Reports record success checks, changed files, observed command exit codes, tool 
 - `skills/local-coder/scripts/server.py`: MCP interface to the same runtime.
 
 Dependencies and inference behavior are covered by separate checks. The native MCP SDK is constrained to 1.x because this repository uses its 1.x result API.
+
+## Inference measurements and tuning
+
+```bash
+python main.py models --threads 4 --batch-threads 4 --batch-size 512 --micro-batch-size 256
+python main.py models --flash-attention --key-cache-type q8_0 --value-cache-type q8_0
+python main.py benchmark --output /tmp/inference.json --warmups 1 --repeats 3
+```
+
+Thread, batch, attention, and KV-cache options apply to embedded inference. KV types are `f16`, `q8_0`, or `q4_0`; quantized value caches require Flash Attention. Backend/platform support still determines whether a setting works. Benchmark before adopting a setting; larger batches are not always faster.
+
+Reports retain individual samples and medians for request latency, load time, first streamed output, and available native prompt/generation throughput. Unsupported rates remain null; server end-to-end latency is not mislabeled as decode speed. A warm-up excludes model loading from the sampled steady-state requests; use `--warmups 0` to include a cold first request. Run results also contain total, context preparation, model, and tool timings and call counts. Real benchmarks require a configured model.

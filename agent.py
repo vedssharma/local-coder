@@ -1,5 +1,5 @@
 """Bounded agent execution with explicit, inspectable outcomes."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 import time
@@ -29,6 +29,7 @@ class RunResult:
     steps: int = 0
     generated_tokens: int = 0
     reason: str = ''
+    performance: dict = field(default_factory=dict)
 
 
 def _build_tool_schemas(mcp_client=None):
@@ -55,8 +56,10 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     context_manager = context_manager or ContextManager(window=32768)
     started, generated, failures, steps = time.monotonic(), 0, {}, 0
 
+    metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0}
+
     def finish(status, text, reason=''):
-        result = RunResult(status, text, steps, generated, reason)
+        result = RunResult(status, text, steps, generated, reason, {**metrics, 'total_seconds': time.monotonic() - started})
         emit({'type': 'run_finished', 'status': status, 'reason': reason})
         return result
 
@@ -77,8 +80,13 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         if schemas:
             kwargs['tools'] = schemas
         try:
+            phase = time.monotonic()
             context_manager.fit(messages, schemas, kwargs['max_tokens'])
+            metrics['context_seconds'] += time.monotonic() - phase
+            phase = time.monotonic()
+            metrics['model_calls'] += 1
             response = llm.create_chat_completion(**kwargs)
+            metrics['model_seconds'] += time.monotonic() - phase
             choice = response['choices'][0]
             message = choice['message']
             if not isinstance(message, dict):
@@ -141,7 +149,10 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                     raise ValueError(f'Unknown or unavailable tool: {name}')
                 args = json.loads(raw) if isinstance(raw, str) else raw
                 validate(args, registered[name])
+                phase = time.monotonic()
+                metrics['tool_calls'] += 1
                 output = mcp_client.call_tool(name, args) or '(empty result)'
+                metrics['tool_seconds'] += time.monotonic() - phase
                 output = str(output)
             except (ValueError, TypeError, ValidationError) as exc:
                 output = f'Error: invalid tool call: {exc}'

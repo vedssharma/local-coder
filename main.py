@@ -340,12 +340,22 @@ def models(
     chat_format: str = typer.Option(None, '--chat-format'),
     supports_tools: bool = typer.Option(None, '--tools/--no-tools'),
     streaming: bool = typer.Option(None, '--stream/--no-stream'),
+    threads: int = typer.Option(None, '--threads', min=1),
+    batch_threads: int = typer.Option(None, '--batch-threads', min=1),
+    batch_size: int = typer.Option(None, '--batch-size', min=1),
+    micro_batch_size: int = typer.Option(None, '--micro-batch-size', min=1),
+    flash_attention: bool = typer.Option(None, '--flash-attention/--no-flash-attention'),
+    key_cache_type: str = typer.Option(None, '--key-cache-type'),
+    value_cache_type: str = typer.Option(None, '--value-cache-type'),
 ):
     """Show current model or set a new model."""
     global llm
     updates = {'backend': backend, 'base_url': base_url, 'model': model_name,
                'n_ctx': context_window, 'chat_format': chat_format,
-               'supports_tools': supports_tools, 'stream': streaming}
+               'supports_tools': supports_tools, 'stream': streaming,
+               'n_threads': threads, 'n_threads_batch': batch_threads, 'n_batch': batch_size,
+               'n_ubatch': micro_batch_size, 'flash_attn': flash_attention,
+               'type_k': key_cache_type, 'type_v': value_cache_type}
     updates = {k: v for k, v in updates.items() if v is not None}
     if updates:
         profile = {**config.get_model_config(), **updates}
@@ -403,6 +413,27 @@ def models(
             typer.echo(f"  Status: ✓ Available")
         else:
             typer.echo(f"  Status: ✗ Not found")
+
+
+@app.command()
+def benchmark(
+    output: str = typer.Option(..., '--output'),
+    prompt: str = typer.Option('Explain why binary search takes logarithmic time.'),
+    repeats: int = typer.Option(3, min=1),
+    warmups: int = typer.Option(1, min=0),
+    max_tokens: int = typer.Option(128, min=1),
+):
+    """Measure real configured inference; missing models/errors never count as passes."""
+    from performance import benchmark as measure
+    import json
+    from pathlib import Path
+    try:
+        report = measure(get_llm(), prompt, repeats, warmups, max_tokens)
+        Path(output).write_text(json.dumps(report, indent=2) + '\n')
+        typer.echo(json.dumps(report['median'], indent=2))
+    except (OSError, ValueError) as exc:
+        typer.echo(f'Benchmark failed: {exc}', err=True)
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
