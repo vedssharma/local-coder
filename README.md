@@ -165,3 +165,22 @@ On Unix platforms, `python main.py ask "question" --persistent` starts or reuses
 Use `python main.py inference-server` for foreground operation, or `python main.py inference-server --stop` to stop it (including after changing configuration). Stop/restart after tuning or model changes. The daemon remains alive after a one-shot command; it occupies model memory until stopped. Logs and the socket live under `LOCAL_CODER_CONFIG_DIR`. Server backends already retain models and do not use this daemon.
 
 Token budgeting uses a bounded in-memory cache of counts for serialized message and schema fragments. It reuses unchanged fragments, invalidates changed contents, and clears when the tokenizer changes. Framing/boundary margins remain conservative; this is an estimate rather than an exact model-specific chat-template count. Run metrics expose cache hits/misses. Cached and uncached budgeting use the same estimate, and the cache stores hashes/counts rather than prompt text.
+
+### Named models and explicit routing
+
+Configure/download each model first, then save a snapshot:
+
+```bash
+python main.py profiles save small
+# Change model/tuning, then:
+python main.py profiles save large
+python main.py profiles use small
+python main.py profiles route answer small
+python main.py profiles route code large
+python main.py ask "question" --task-kind answer --route
+python main.py edit "fix the tests" --mode execute --profile large
+python main.py benchmark --compare small --compare large --output /tmp/comparison.json
+python evaluations/run.py --profile small --allow-execution --output /tmp/small-quality.json
+```
+
+`--profile` overrides routing. Routes are used only with `--route` and choose a model once at task startup; there is no hidden difficulty classifier or mid-turn model swap. Without routing, the active profile (or the base `default`) is used. `profiles use default` restores the base configuration; `profiles route code default` clears that route. Subsequent `models` changes update the active named profile while preserving other profiles. Named snapshots do not inherit later base tuning changes. Comparisons run sequentially, release each model, and record settings and raw samples. Compare coding success as well as latency before choosing a smaller/quantized model. A private daemon retains one profile at a time and requires stop/restart when switching.

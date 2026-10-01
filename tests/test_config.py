@@ -155,3 +155,32 @@ class TestGetModelConfig:
         cfg.CONFIG_FILE.write_text(json.dumps(custom))
         result = cfg.get_model_config()
         assert result["n_ctx"] == 512
+
+
+def test_profiles_and_opt_in_routing_preserve_settings(config_dir):
+    cfg.save_config({**cfg.DEFAULT_CONFIG, 'n_threads': 2})
+    cfg.save_profile('small')
+    cfg.update_model_config({'n_threads': 4})
+    cfg.save_profile('large')
+    cfg.activate_profile('small')
+    cfg.update_model_config({'n_ctx': 2048})
+    cfg.set_route('code', 'large')
+    assert cfg.get_model_config()['n_threads'] == 2
+    assert cfg.get_model_config()['n_ctx'] == 2048
+    assert cfg.get_model_config(task_kind='code', use_routes=True)['n_threads'] == 4
+    assert cfg.get_model_config('small', 'code', True)['n_threads'] == 2
+    cfg.activate_profile('default')
+    assert cfg.get_model_config()['n_threads'] == 4
+    assert 'small' in cfg.load_config()['profiles']
+    with pytest.raises(ValueError):
+        cfg.get_model_config('unknown')
+
+
+def test_named_profile_is_a_snapshot_not_affected_by_new_global_tuning(config_dir):
+    cfg.save_profile('saved')
+    cfg.update_model_config({'n_threads': 8})
+    assert 'n_threads' not in cfg.get_model_config('saved')
+    cfg.activate_profile('saved')
+    assert cfg.get_model_config('default')['n_threads'] == 8
+    with pytest.raises(ValueError):
+        cfg.save_profile('default')

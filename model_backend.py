@@ -63,6 +63,9 @@ class ModelAdapter:
         self.emit({'type': 'inference_metrics', **metrics})
         return response
 
+    def close(self):
+        """Release owned resources. Remote adapters do not own their server."""
+
     def backend_metrics(self):
         return {}
 
@@ -145,6 +148,12 @@ class EmbeddedModel(ModelAdapter):
                 llama_cpp.llama_perf_context_reset(model._ctx.ctx)
             result = model.create_chat_completion(**kwargs)
             return self.collect(result) if kwargs['stream'] else result
+
+    def close(self):
+        with self._lock:
+            if self._model is not None:
+                self._model.close()
+                self._model = None
 
     def backend_metrics(self):
         try:

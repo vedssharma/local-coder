@@ -259,3 +259,14 @@ def test_configure_openai_profile(config_dir):
     profile = config.get_model_config()
     assert profile['backend'] == 'openai' and profile['model'] == 'coder'
     assert profile['supports_tools'] is False
+
+
+def test_profile_cli_preserves_named_settings(config_dir):
+    result = runner.invoke(app, ['profiles', 'save', 'small'])
+    assert result.exit_code == 0, result.output
+    assert runner.invoke(app, ['profiles', 'use', 'small']).exit_code == 0
+    assert runner.invoke(app, ['models', '--threads', '2']).exit_code == 0
+    assert runner.invoke(app, ['profiles', 'route', 'answer', 'small']).exit_code == 0
+    import config
+    assert config.get_model_config('small')['n_threads'] == 2
+    assert config.load_config()['routes']['answer'] == 'small'

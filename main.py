@@ -93,7 +93,7 @@ def handle_model_command():
         config.set_model_path(abs_path)
         profile = config.get_model_config()
         profile['backend'] = 'embedded'
-        config.save_config(profile)
+        config.update_model_config(profile)
         llm = EmbeddedModel(profile)
         llm._model = loaded
         typer.echo(f"Switched to: {os.path.basename(abs_path)}\n")
@@ -207,7 +207,7 @@ def handle_md_command(console, max_tokens):
         typer.echo("Write cancelled.\n")
 
 
-def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind="auto", persistent=False):
+def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind="auto", persistent=False, profile_name=None, route=False):
     if mode not in MODES:
         raise typer.BadParameter('mode must be read-only, workspace-edit, or execute')
     streamed = False
@@ -225,14 +225,16 @@ def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, cons
             if event['status'] != 'completed':
                 console.print(f"Run {event['status']}: {event['reason']}", markup=False)
             streamed = False
-    model = get_llm()
+    effective_task = task_kind if task_kind != 'auto' else ('inspect' if mode == 'read-only' else 'code')
+    selected = config.get_model_config(profile_name, effective_task, route)
+    model = create_model(selected) if profile_name or route else get_llm()
     if persistent:
         from inference_daemon import PersistentModel
-        model = PersistentModel(config.get_model_config(), config.CONFIG_DIR)
+        model = PersistentModel(selected, config.CONFIG_DIR)
     return Runtime(model, os.getcwd(), config.CONFIG_DIR, mode=mode,
         mcp_client=None if no_mcp else get_mcp_client(), emit=emit,
         budget=RunBudget(max_steps, max_seconds, token_budget),
-        context_window=config.get_model_config()['n_ctx'], trace=trace, task_kind=task_kind)
+        context_window=selected['n_ctx'], trace=trace, task_kind=task_kind)
 
 
 def execute_turn(runtime, prompt, max_tokens):
@@ -256,9 +258,11 @@ def ask(
     trace: bool = typer.Option(False, '--trace'),
     task_kind: str = typer.Option('auto', '--task-kind', help='auto, answer, inspect, code, or all'),
     persistent: bool = typer.Option(False, '--persistent'),
+    profile_name: str = typer.Option(None, '--profile'),
+    route: bool = typer.Option(False, '--route', help='Opt in to configured task-kind routing'),
 ):
     """Ask a question or run a bounded coding task."""
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
@@ -276,10 +280,12 @@ def chat(
     trace: bool = typer.Option(False, '--trace'),
     task_kind: str = typer.Option('auto', '--task-kind', help='auto, answer, inspect, code, or all'),
     persistent: bool = typer.Option(False, '--persistent'),
+    profile_name: str = typer.Option(None, '--profile'),
+    route: bool = typer.Option(False, '--route', help='Opt in to configured task-kind routing'),
 ):
     """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /exit."""
     console = Console()
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent, profile_name, route) as runtime:
         if resume:
             runtime.resume(resume)
         while True:
@@ -322,9 +328,11 @@ def edit(
     trace: bool = typer.Option(False, '--trace'),
     task_kind: str = typer.Option('auto', '--task-kind', help='auto, answer, inspect, code, or all'),
     persistent: bool = typer.Option(False, '--persistent'),
+    profile_name: str = typer.Option(None, '--profile'),
+    route: bool = typer.Option(False, '--route', help='Opt in to configured task-kind routing'),
 ):
     """Apply targeted edits; --mode execute also permits validation commands."""
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
@@ -376,7 +384,7 @@ def models(
             create_model(profile)
         except ValueError as exc:
             raise typer.BadParameter(str(exc))
-        config.save_config(profile)
+        config.update_model_config(profile)
         llm = None
         typer.echo('Model profile updated.')
 
@@ -397,7 +405,7 @@ def models(
         if config.set_model_path(abs_path):
             profile = config.get_model_config()
             profile['backend'] = 'embedded'
-            config.save_config(profile)
+            config.update_model_config(profile)
             llm = None
             typer.echo(f"✓ Model updated successfully!")
             typer.echo(f"  New model: {abs_path}")
@@ -435,18 +443,61 @@ def benchmark(
     repeats: int = typer.Option(3, min=1),
     warmups: int = typer.Option(1, min=0),
     max_tokens: int = typer.Option(128, min=1),
+    profile_name: str = typer.Option(None, '--profile'),
+    compare: list[str] = typer.Option(None, '--compare'),
 ):
     """Measure real configured inference; missing models/errors never count as passes."""
     from performance import benchmark as measure
     import json
     from pathlib import Path
     try:
-        report = measure(get_llm(), prompt, repeats, warmups, max_tokens)
-        Path(output).write_text(json.dumps(report, indent=2) + '\n')
-        typer.echo(json.dumps(report['median'], indent=2))
+        names = compare or [profile_name]
+        reports = []
+        for name in names:
+            profile = config.get_model_config(name)
+            model = create_model(profile)
+            try:
+                report = measure(model, prompt, repeats, warmups, max_tokens)
+                safe_keys = ('backend', 'model', 'model_path', 'n_ctx', 'n_threads', 'n_threads_batch',
+                             'n_batch', 'n_ubatch', 'type_k', 'type_v', 'flash_attn', 'prompt_cache_mb')
+                report['profile'] = name or config.load_config().get('active_profile', 'default')
+                report['settings'] = {key: profile[key] for key in safe_keys if key in profile}
+                reports.append(report)
+            finally:
+                model.close()
+        result = {'version': 1, 'comparisons': reports} if compare else reports[0]
+        Path(output).write_text(json.dumps(result, indent=2) + '\n')
+        typer.echo(json.dumps([r['median'] for r in reports], indent=2))
+        if not all(r['all_completed'] for r in reports):
+            typer.echo('Some responses were truncated; inspect the samples.', err=True)
     except (OSError, ValueError) as exc:
         typer.echo(f'Benchmark failed: {exc}', err=True)
         raise typer.Exit(1)
+
+
+@app.command()
+def profiles(action: str = typer.Argument('list'), name: str = typer.Argument(None),
+             target: str = typer.Argument(None)):
+    """Manage named configurations: list, save NAME, use NAME, route TASK NAME."""
+    global llm
+    import json
+    try:
+        if action == 'list':
+            data = config.load_config()
+            typer.echo(json.dumps({'active': data.get('active_profile', 'default'),
+                                  'profiles': sorted(data.get('profiles', {})),
+                                  'routes': data.get('routes', {})}, indent=2))
+        elif action == 'save':
+            config.save_profile(name)
+        elif action == 'use':
+            config.activate_profile(name)
+            llm = None
+        elif action == 'route':
+            config.set_route(name, target)
+        else:
+            raise ValueError('Use list, save NAME, use NAME, or route TASK NAME')
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc))
 
 
 @app.command()
