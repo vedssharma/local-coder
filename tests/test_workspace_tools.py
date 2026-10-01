@@ -1,6 +1,7 @@
 import json
 import sys
 import time
+import pytest
 from workspace_tools import WorkspaceTools
 
 
@@ -9,6 +10,56 @@ def wait(tools, result):
         time.sleep(0.01)
         result = json.loads(tools.call_tool('poll_process', {'process_id': result['process_id']}))
     return result
+
+
+def test_bash_pipeline_redirect_cwd_and_exit_status(tmp_path):
+    (tmp_path / 'subdir').mkdir()
+    tools = WorkspaceTools(tmp_path, mode='execute')
+    try:
+        result = wait(tools, json.loads(tools.call_tool('bash', {
+            'command': "values=(alpha beta); printf '%s\\n' \"${values[@]}\" | tr a-z A-Z > result.txt; cat result.txt; printf 'stderr\\n' >&2; exit 7",
+            'cwd': 'subdir'})))
+        assert result['exit_code'] == 7
+        assert 'ALPHA\nBETA\n' in result['output'] and 'stderr' in result['output']
+        assert (tmp_path / 'subdir' / 'result.txt').read_text() == 'ALPHA\nBETA\n'
+    finally:
+        tools.close()
+
+
+@pytest.mark.parametrize('mode', ['read-only', 'workspace-edit'])
+def test_bash_requires_execute_mode(tmp_path, mode):
+    tools = WorkspaceTools(tmp_path, mode=mode)
+    assert 'bash' not in tools.tool_names
+    assert tools.call_tool('bash', {'command': 'touch forbidden'}).startswith('Error:')
+    assert not (tmp_path / 'forbidden').exists()
+
+
+def test_bash_validation_and_missing_executable(tmp_path, monkeypatch):
+    tools = WorkspaceTools(tmp_path, mode='execute')
+    assert 'bash' in {s['function']['name'] for s in tools.selected_schemas('code')}
+    assert 'bash' not in {s['function']['name'] for s in tools.selected_schemas('inspect')}
+    for args in ({'command': ''}, {'command': ' '}, {'command': []},
+                 {'command': 'touch forbidden', 'cwd': '..'},
+                 {'command': 'touch forbidden', 'timeout_seconds': 301}):
+        assert tools.call_tool('bash', args).startswith('Error:')
+    monkeypatch.setattr('workspace_tools.shutil.which', lambda _: None)
+    assert 'Bash is not installed' in tools.call_tool('bash', {'command': 'true'})
+    assert not tools.processes
+
+
+def test_bash_timeout_cancel_and_noninteractive_input(tmp_path):
+    tools = WorkspaceTools(tmp_path, mode='execute')
+    try:
+        eof = wait(tools, json.loads(tools.call_tool('bash', {'command': 'read value'})))
+        assert eof['exit_code'] == 1
+        timed = wait(tools, json.loads(tools.call_tool('bash', {
+            'command': 'sleep 30', 'timeout_seconds': 1})))
+        assert timed['timed_out'] and timed['exit_code'] != 0
+        running = json.loads(tools.call_tool('bash', {'command': 'sleep 30'}))
+        cancelled = json.loads(tools.call_tool('cancel_process', {'process_id': running['process_id']}))
+        assert not cancelled['running'] and cancelled['exit_code'] != 0
+    finally:
+        tools.close()
 
 
 def test_patch_rejects_stale_and_ambiguous_text(tmp_path):

@@ -23,7 +23,7 @@ def _load_context_md(root=None):
 def build_system_message(root=None):
     base = (
         "You are a coding assistant. Inspect files with read_file, list_directory, or search_code; never guess their contents. "
-        "Use available tools only. Batch independent reads/searches; do not repeat unchanged observations. Make targeted apply_patch edits, verify with run_command when permitted, "
+        "Use available tools only. Batch independent reads/searches; do not repeat unchanged observations. Make targeted apply_patch edits, verify with run_command or bash when permitted, "
         "poll commands to completion, and inspect git_diff. Distinguish observed check results from assumptions."
     )
 

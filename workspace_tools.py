@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -30,6 +31,10 @@ SCHEMAS = [
     schema('run_command', 'Run an argv command in the workspace. Poll returned process_id until it exits.',
            {'argv': {'type': 'array', 'items': STRING, 'minItems': 1}, 'cwd': STRING,
             'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 300}}, ['argv']),
+    schema('bash', 'Run a non-interactive Bash command, including pipes and redirects, in the workspace. '
+           'Poll returned process_id until it exits. No persistent shell or interactive stdin.',
+           {'command': {'type': 'string', 'minLength': 1}, 'cwd': STRING,
+            'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 300}}, ['command']),
     schema('poll_process', 'Get command output and exit status.', {'process_id': STRING}, ['process_id']),
     schema('cancel_process', 'Terminate a command process group.', {'process_id': STRING}, ['process_id']),
     schema('git_diff', 'Show tracked changes from HEAD and list untracked workspace files.', {}),
@@ -94,7 +99,7 @@ class WorkspaceTools:
                      if s['function']['name'] not in names and s['function']['name'] in MCP_READ_TOOLS]
         allowed = READ_TOOLS | ({'apply_patch'} if self.mode != 'read-only' else set())
         if self.mode == 'execute':
-            allowed |= {'run_command', 'poll_process', 'cancel_process'}
+            allowed |= {'run_command', 'bash', 'poll_process', 'cancel_process'}
         return [s for s in SCHEMAS if s['function']['name'] in allowed] + extra
 
     def selected_schemas(self, task_kind='auto'):
@@ -187,6 +192,16 @@ class WorkspaceTools:
             if name == 'run_command':
                 return json.dumps(self._start(args['argv'], self.path(args.get('cwd', '.')),
                                               args.get('timeout_seconds', 60)))
+            if name == 'bash':
+                command = args['command']
+                if not isinstance(command, str) or not command.strip():
+                    raise ValueError('command must be a nonempty string')
+                executable = shutil.which('bash')
+                if not executable:
+                    raise ValueError('Bash is not installed or is unavailable on PATH')
+                return json.dumps(self._start([executable, '--noprofile', '--norc', '-c', command],
+                                              self.path(args.get('cwd', '.')),
+                                              args.get('timeout_seconds', 60)))
             if name in ('poll_process', 'cancel_process'):
                 state = self.processes[args['process_id']]
                 if name == 'cancel_process':
@@ -247,7 +262,8 @@ class WorkspaceTools:
             raise ValueError('argv must be a nonempty string array')
         if not 1 <= timeout <= 300:
             raise ValueError('timeout_seconds must be between 1 and 300')
-        proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         key = uuid.uuid4().hex
         state = {'proc': proc, 'output': b'', 'deadline': time.monotonic() + timeout,

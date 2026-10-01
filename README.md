@@ -61,7 +61,9 @@ python main.py edit "Fix the failing tests and verify the changes" --mode execut
 python main.py chat --mode execute --max-steps 60 --max-seconds 600 --token-budget 16384
 ```
 
-The native tools are `read_file` (line ranges), `list_directory`, `search_code` (content search via `rg`), `apply_patch` (exactly one matching block, or creation of a new file), `git_diff`, and—in execute mode—`run_command`, `poll_process`, and `cancel_process`. Commands take an argv array and return output, exit status, and a process handle. Their timeout is 1–300 seconds. The runtime terminates remaining command processes when it closes.
+The native tools are `read_file` (line ranges), `list_directory`, `search_code` (content search via `rg`), `apply_patch` (exactly one matching block, or creation of a new file), `git_diff`, and—in execute mode—`run_command`, `bash`, `poll_process`, and `cancel_process`. `run_command` takes an argv array; `bash` takes a `command` string and supports Bash syntax such as pipes, redirects, and multiline scripts. Both return combined stdout/stderr, exit status, and a process handle. Their timeout is 1–300 seconds. The runtime terminates remaining command processes when it closes.
+
+For example, the agent can call `bash` with `{"command": "python -m pytest -q", "cwd": ".", "timeout_seconds": 120}`. Poll the returned `process_id` with `poll_process` until `running` is false, or use `cancel_process` to stop it. Output retains at most 32,000 bytes and reports truncation. Bash must be installed on PATH; it runs without profile or rc files, with stdin closed. Each call starts a fresh shell; variables and working-directory changes do not persist between calls. The optional `cwd` must resolve inside the workspace. Like `run_command`, `bash` runs with host privileges in execute mode; the command body is not filesystem-sandboxed.
 
 Native tools work without Node. `--mcp` adds known read-only tools from `@modelcontextprotocol/server-filesystem`; `--no-mcp` is the default. Arbitrary MCP tools and MCP mutation tools are not exposed. Repository instructions and tool output cannot elevate the selected mode.
 
