@@ -27,7 +27,7 @@ def test_minimal_tools_and_unchanged_file_context(tmp_path):
         assert sum('unique file content' in m.get('content', '') for m in runtime.messages) == 1
         names = {s['function']['name'] for s in model.create_chat_completion.call_args.kwargs['tools']}
         assert names == {'read_file', 'list_directory', 'search_code', 'batch_read', 'batch_search',
-                         'web_search', 'web_fetch'}
+                         'web_search', 'web_fetch', 'read_artifact'}
         runtime.turn('changed', {'a.py': 'updated file content'})
         assert 'updated file content' in runtime.messages[-2]['content']
     with Runtime(model, tmp_path, tmp_path / 'state', task_kind='answer') as runtime:

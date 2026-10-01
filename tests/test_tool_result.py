@@ -44,8 +44,8 @@ def test_bounded_envelope_retains_status_and_artifact(tmp_path):
     assert model['status'] == 'failed' and model['error_code'] == 'command_failed'
     assert model['data_truncated'] and len(model['data']) < 4000
     assert model['artifacts'] == result.artifacts
-    from pathlib import Path
-    assert json.loads(Path(model['artifacts'][0]).read_text())['exit_code'] == 3
+    assert model['data']['exit_code'] == 3
+    assert json.loads((tmp_path / model['artifacts'][0]).read_text())['exit_code'] == 3
 
 
 def test_successful_error_prefixed_text_does_not_block_agent(tmp_path):

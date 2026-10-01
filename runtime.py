@@ -50,12 +50,14 @@ class Runtime:
         self.session_id = key
         self.context.memory = []
         self.context.task = None
+        self.context.active_notes = []
 
     def new(self):
         self.messages = []
         self.session_id = None
         self.context.memory = []
         self.context.task = None
+        self.context.active_notes = []
 
     def turn(self, prompt, file_contents=None, max_tokens=512):
         if not isinstance(max_tokens, int) or max_tokens <= 0:

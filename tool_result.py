@@ -52,12 +52,14 @@ class ToolResult:
         if bounded != text:
             envelope['data'] = bounded
             envelope['data_truncated'] = True
-            if context.artifact_dir:
-                import hashlib
-                path = context.artifact_dir / (hashlib.sha256(text.encode()).hexdigest() + '.txt')
-                if path.exists() and str(path) not in self.artifacts:
-                    self.artifacts.append(str(path))
-                envelope['artifacts'] = list(self.artifacts)
+            artifact = context.retain_artifact(text)
+            if artifact and artifact not in self.artifacts:
+                self.artifacts.append(artifact)
+            envelope['artifacts'] = list(self.artifacts)
+            if isinstance(self.data, dict):
+                preserved = {k:v for k,v in self.data.items() if k in
+                    ('exit_code','running','process_id','timed_out','cancelled','url','title','content_type')}
+                envelope['data'] = {**preserved, 'preview':bounded}
         return json.dumps(envelope, ensure_ascii=False)
 
 
