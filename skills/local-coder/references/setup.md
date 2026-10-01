@@ -30,3 +30,9 @@ Coding tools accept an optional `profile` naming an existing saved model configu
 Set `LOCAL_CODER_PROCESS_WAIT_SECONDS` at launch to control runtime-managed command waiting (default 2 seconds, range 0–30). Zero returns command handles immediately. The runtime polls during the wait without additional model calls; long jobs still return handles for explicit polling or cancellation.
 
 `LOCAL_CODER_TOOL_WORKERS` controls independent read concurrency (default 4, range 1–8); mutations and unknown tools stay serial.
+
+Coding results also expose `changed_files`, `checks`, `outstanding_processes`, `verification_status`, and `verification_scope`. Model completion and observed verification are distinct. Failed/stale checks, running jobs, and uncertain interrupted effects prevent a successful completion result. Checks marked `verification=true` preserve their actual exit status; no observed check means `not_run`.
+
+Session journals recover completed observations without replaying commands or edits. Interrupted edits require rereading the affected file. Unknown command effects require inspection and explicit acknowledgement in the local CLI (`/acknowledge-interrupted`); MCP does not implicitly acknowledge them.
+
+Validate setup with `python -m pytest -q` and `python evaluations/run.py --scripted --suite all --output /tmp/harness-mechanics.json`. Scripted evaluations verify mechanics without loading a model; configured-model coding runs require `--allow-execution` and remain separate quality measurements.

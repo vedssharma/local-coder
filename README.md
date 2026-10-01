@@ -61,7 +61,7 @@ python main.py edit "Fix the failing tests and verify the changes" --mode execut
 python main.py chat --mode execute --max-steps 60 --max-seconds 600 --token-budget 16384
 ```
 
-The native tools are `read_file` (line ranges), `list_directory`, `search_code` (content search via `rg`), `apply_patch` (exactly one matching block, or creation of a new file), `git_diff`, and—in execute mode—`run_command`, `bash`, `poll_process`, and `cancel_process`. `run_command` takes an argv array; `bash` takes a `command` string and supports Bash syntax such as pipes, redirects, and multiline scripts. Both return combined stdout/stderr, exit status, and a process handle. Their timeout is 1–300 seconds. The runtime terminates remaining command processes when it closes.
+The native tools are `read_file` (line ranges), `list_directory`, `search_code` (content search via `rg`), `batch_read`, `batch_search`, `web_search`, `web_fetch`, `read_artifact`, `apply_patch` (exactly one matching block, or creation of a new file), `git_diff`, and—in execute mode—`run_command`, `bash`, `poll_process`, and `cancel_process`. `run_command` takes an argv array; `bash` takes a `command` string and supports Bash syntax such as pipes, redirects, and multiline scripts. Both return combined stdout/stderr, exit status, and a process handle. Their timeout is 1–300 seconds. The runtime terminates remaining command processes when it closes.
 
 For example, the agent can call `bash` with `{"command": "python -m pytest -q", "cwd": ".", "timeout_seconds": 120}`. Poll the returned `process_id` with `poll_process` until `running` is false, or use `cancel_process` to stop it. Output retains at most 32,000 bytes and reports truncation. Bash must be installed on PATH; it runs without profile or rc files, with stdin closed. Each call starts a fresh shell; variables and working-directory changes do not persist between calls. The optional `cwd` must resolve inside the workspace. Like `run_command`, `bash` runs with host privileges in execute mode; the command body is not filesystem-sandboxed.
 
@@ -231,7 +231,7 @@ The CLI and MCP runtime wait up to 2 seconds for each `run_command`, `bash`, or 
 
 Use `--process-wait-seconds 0` on `ask`, `chat`, or `edit` to retain immediate handles, or choose a wait interval up to 30 seconds. MCP hosts can set `LOCAL_CODER_PROCESS_WAIT_SECONDS` at server launch. The runtime emits incremental `process_output` events while waiting, and the CLI displays them. Terminal output remains capped at 32,000 bytes; missing output is marked as truncated.
 
-Waiting respects the remaining run deadline and cancellation signal. Cancellation or budget exhaustion cleans up outstanding process groups, including jobs that outlasted an earlier wait interval; closing the runtime also stops them. Native command timeouts still apply. A successful model response can still leave a command running inside an open chat runtime, so a process handle alone is not evidence that a check passed. This process waiting policy does not make embedded inference forcibly interruptible.
+Waiting respects the remaining run deadline and cancellation signal. Cancellation or budget exhaustion cleans up outstanding process groups, including jobs that outlasted an earlier wait interval; closing the runtime also stops them. Native command timeouts still apply. A model response can still leave a command running inside an open chat runtime, which is reported as `blocked` / `verification_in_progress`; so a process handle alone is not evidence that a check passed. This process waiting policy does not make embedded inference forcibly interruptible.
 
 ### Shared execution deadlines
 
@@ -270,3 +270,15 @@ Resume reconstructs missing tool results from completed journal entries and neve
 The latest rerun of the same command replaces its earlier result; independent failed checks remain failures. Applying a patch invalidates checks recorded before that edit. Merely observing `git_diff` does not invalidate them. Final model prose is labeled as a model summary when evidence contradicts completion; the runtime returns `blocked` for failed/stale checks, outstanding jobs, and interrupted effects requiring inspection. Edits with no checks are explicitly reported as unverified.
 
 Verification covers observed commands and changes, not test coverage or task correctness. Arbitrary shell/MCP mutations are not fully tracked, and an exit-zero command does not establish that a meaningful check ran. Real-model evaluations and appropriate project tests remain necessary.
+
+### Loop regression evaluations
+
+The expanded suite adds eight fault-injection cases: malformed arguments with recovery, transient read retries, cancellation with a pending mutation, overlapping reads with ordered results, long-turn compaction, inspection after an interrupted write, permission enforcement against untrusted web instructions, and a false claim that a failing check passed.
+
+```bash
+python evaluations/run.py --scripted --suite all --output /tmp/all-mechanics.json
+python evaluations/run.py --scripted --suite all --baseline /tmp/all-mechanics.json --output /tmp/after.json
+python evaluations/run.py --profile small --allow-execution --baseline /tmp/small-quality.json --output /tmp/small-after.json
+```
+
+Reports include model requests, tool calls, retries, generated tokens, elapsed time, verification state, and per-case success criteria. Baseline comparisons show metric deltas and success changes; modes must match. Keep environment, model settings, and workloads comparable, and repeat real-model runs before attributing timing differences to an optimization. Loop fault injection requires `--scripted`; its web case tests permission enforcement against deliberately hostile tool content, not a model's resistance to prompt injection. Actual abrupt-process crash recovery is additionally exercised by the subprocess regression tests.

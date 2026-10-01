@@ -340,7 +340,7 @@ class WorkspaceTools:
 
     def _process_control(self, args, cancel=False):
         state = self.processes[args['process_id']]
-        if cancel:
+        if cancel and state['proc'].poll() is None:
             state['cancelled'] = True
             self._kill(state)
         return ToolResult.process(self._poll(args['process_id']))
@@ -413,7 +413,8 @@ class WorkspaceTools:
                                 start_new_session=True)
         key = uuid.uuid4().hex
         state = {'proc': proc, 'output': b'', 'deadline': time.monotonic() + timeout,
-                 'timed_out': False, 'output_truncated': False, 'output_bytes': 0, 'lock': threading.Lock()}
+                 'timed_out': False, 'output_truncated': False, 'output_bytes': 0, 'lock': threading.Lock(),
+                 'kill_lock': threading.Lock(), 'group_cleaned': False}
         self.processes[key] = state
         def drain():
             while chunk := proc.stdout.read1(4096):
@@ -451,11 +452,17 @@ class WorkspaceTools:
 
     @staticmethod
     def _kill(state):
-        try:
-            os.killpg(state['proc'].pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        state['proc'].wait()
+        # Poll, timeout, cancellation and close may all attempt cleanup. Signal a
+        # process group only once, rather than a later reused numeric group ID.
+        with state['kill_lock']:
+            if state['group_cleaned']:
+                return
+            try:
+                os.killpg(state['proc'].pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            state['proc'].wait()
+            state['group_cleaned'] = True
 
     def _capture(self, argv):
         result = self._start(argv, self.root, 30)

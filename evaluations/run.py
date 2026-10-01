@@ -173,6 +173,9 @@ def evaluate(case, scripted=False, profile=None, model=None):
         return {'case': case, 'passed': all(checks.values()), 'checks': checks,
                 'outcome': final.status, 'reason': final.reason, 'seconds': round(elapsed, 3),
                 'generated_tokens': sum(r.generated_tokens for r in results),
+                'model_calls': sum(r.performance.get('model_calls',0) for r in results),
+                'retries': sum(e['type']=='tool_retry' for e in events),
+                'verification_status': final.verification_status,
                 'tool_calls': sum(e['type'] == 'tool_started' for e in events),
                 'tool_failures': sum(e['type'] == 'tool_finished' and e['result']['status'] in ('error', 'failed', 'timed_out') for e in events),
                 'changed_files': changed, 'command_exit_codes': command_exits,
@@ -184,24 +187,40 @@ def main():
     parser.add_argument('--profile', help='Named model configuration to evaluate')
     parser.add_argument('--scripted', action='store_true', help='Validate harness mechanics without an LLM')
     parser.add_argument('--allow-execution', action='store_true', help='Allow real-model commands with host privileges in disposable fixtures')
-    parser.add_argument('--case', choices=CASES, action='append')
+    from evaluations.loop import CASES as LOOP_CASES, evaluate as evaluate_loop
+    parser.add_argument('--suite', choices=('coding','loop','all'), default='coding')
+    parser.add_argument('--case', choices=CASES+LOOP_CASES, action='append')
+    parser.add_argument('--baseline', type=Path, help='Compare success and metrics with a previous JSON report')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    if not args.scripted and not args.allow_execution and any(c not in ('navigation', 'permissions') for c in (args.case or CASES)):
+    selected=args.case or (CASES if args.suite=='coding' else LOOP_CASES if args.suite=='loop' else CASES+LOOP_CASES)
+    if not args.scripted and any(c in LOOP_CASES for c in selected):
+        parser.error('Fault-injection loop evaluations require --scripted; they measure mechanics, not model quality')
+    if not args.scripted and not args.allow_execution and any(c not in ('navigation', 'permissions') for c in selected):
         parser.error('Real-model coding evaluations require --allow-execution; commands are not OS-sandboxed')
     profile = None if args.scripted else config.get_model_config(args.profile)
     results = []
-    for case in args.case or CASES:
+    for case in selected:
         try:
-            result = evaluate(case, args.scripted, profile)
+            result = evaluate_loop(case) if case in LOOP_CASES else evaluate(case, args.scripted, profile)
         except Exception as exc:
             result = {'case': case, 'passed': False, 'outcome': 'evaluation_error', 'reason': str(exc)}
         results.append(result)
         print(f"{case}: {'PASS' if result['passed'] else 'FAIL'}", flush=True)
-    report = {'version': 1, 'mode': 'scripted_mechanics' if args.scripted else 'model_evaluation',
+    report = {'version': 2, 'mode': 'scripted_mechanics' if args.scripted else 'model_evaluation',
               'model': {'backend': profile.get('backend'), 'name': profile.get('model', profile.get('model_path')),
                         'n_ctx': profile['n_ctx']} if profile else None,
               'results': results}
+    if args.baseline:
+        baseline=json.loads(args.baseline.read_text())
+        if baseline.get('mode')!=report['mode']:
+            parser.error('Baseline mode must match: scripted mechanics cannot be compared with model quality')
+        prior={r['case']:r for r in baseline['results']}
+        report['comparison']=[{'case':r['case'],'passed_before':prior[r['case']]['passed'],'passed_now':r['passed'],
+            'deltas':{metric:round(r[metric]-prior[r['case']][metric],3)
+                      for metric in ('seconds','model_calls','tool_calls','generated_tokens','retries')
+                      if metric in r and metric in prior[r['case']]}}
+            for r in results if r['case'] in prior]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
     return 0 if all(r['passed'] for r in results) else 1
