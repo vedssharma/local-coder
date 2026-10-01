@@ -13,7 +13,7 @@ from workspace_tools import WorkspaceTools
 
 class Runtime:
     def __init__(self, model, workspace, state_dir, mode='read-only', mcp_client=None,
-                 emit=None, budget=None, context_window=8192, trace=False):
+                 emit=None, budget=None, context_window=8192, trace=False, task_kind="auto"):
         self.model = model
         self.tools = WorkspaceTools(workspace, mcp_client=mcp_client, mode=mode)
         self.store = SessionStore(Path(state_dir) / 'sessions', workspace)
@@ -26,6 +26,7 @@ class Runtime:
         self.budget = budget or RunBudget()
         self.sink = emit or (lambda event: None)
         self.trace = trace
+        self.task_kind = task_kind
 
     def emit(self, event):
         self.sink(event)
@@ -52,7 +53,17 @@ class Runtime:
             raise ValueError('max_tokens must be positive')
         self.cancel_event.clear()
         history = [m for m in self.messages if m.get('role') != 'system' or m.get('name') == 'working_memory']
-        self.messages = build_messages(prompt, file_contents or {}, history=history, root=self.tools.root)
+        file_contents = file_contents or {}
+        fresh, reused = {}, []
+        for name, content in file_contents.items():
+            block = f"<file path='{name}'>\n{content}\n</file>"
+            if any(block in m.get('content', '') for m in history if isinstance(m.get('content'), str)):
+                reused.append(name)
+            else:
+                fresh[name] = content
+        if reused:
+            prompt += '\nUnchanged file context retained earlier in this transcript: ' + ', '.join(reused)
+        self.messages = build_messages(prompt, fresh, history=history, root=self.tools.root)
         self.session_id = self.store.save(self.messages, self.session_id)
         if isinstance(self.model, ModelAdapter):
             self.model.emit = self.emit
@@ -60,7 +71,8 @@ class Runtime:
         try:
             result = run_agent(self.model, self.messages, max_tokens, self.tools,
                                budget=self.budget, cancel_event=self.cancel_event,
-                               emit=self.emit, context_manager=self.context)
+                               emit=self.emit, context_manager=self.context,
+                               tool_schemas=self.tools.selected_schemas(self.task_kind))
             self.emit({'type': 'turn_result', **asdict(result)})
             return result
         finally:

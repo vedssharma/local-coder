@@ -179,6 +179,7 @@ def evaluate(case, scripted=False, profile=None, model=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--profile', help='Named model configuration to evaluate')
     parser.add_argument('--scripted', action='store_true', help='Validate harness mechanics without an LLM')
     parser.add_argument('--allow-execution', action='store_true', help='Allow real-model commands with host privileges in disposable fixtures')
     parser.add_argument('--case', choices=CASES, action='append')
@@ -186,7 +187,7 @@ def main():
     args = parser.parse_args()
     if not args.scripted and not args.allow_execution and any(c not in ('navigation', 'permissions') for c in (args.case or CASES)):
         parser.error('Real-model coding evaluations require --allow-execution; commands are not OS-sandboxed')
-    profile = None if args.scripted else config.get_model_config()
+    profile = None if args.scripted else config.get_model_config(args.profile)
     results = []
     for case in args.case or CASES:
         try:

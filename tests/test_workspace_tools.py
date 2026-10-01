@@ -106,3 +106,14 @@ def test_finished_command_does_not_leave_background_pipe_open(tmp_path):
         assert not state['reader'].is_alive()
     finally:
         tools.close()
+
+
+def test_batches_preserve_order_and_scope(tmp_path):
+    (tmp_path / 'a.py').write_text('alpha\n')
+    (tmp_path / 'b.py').write_text('beta\n')
+    tools = WorkspaceTools(tmp_path)
+    result = json.loads(tools.call_tool('batch_read', {'requests': [{'path': 'b.py'}, {'path': 'a.py'}, {'path': '../outside'}]}))
+    assert 'beta' in result[0]['output'] and 'alpha' in result[1]['output']
+    assert result[2]['output'].startswith('Error:')
+    searches = json.loads(tools.call_tool('batch_search', {'requests': [{'pattern': 'alpha'}, {'pattern': 'beta'}]}))
+    assert 'a.py' in searches[0]['output'] and 'b.py' in searches[1]['output']

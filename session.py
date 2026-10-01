@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import uuid
+from collections import OrderedDict
 
 
 class SessionStore:
@@ -48,16 +49,53 @@ class SessionStore:
 
 
 class ContextManager:
-    def __init__(self, window=8192, count_tokens=None, artifact_dir=None):
+    def __init__(self, window=8192, count_tokens=None, artifact_dir=None, cache_entries=512):
         self.window = window
+        if type(cache_entries) is not int or cache_entries < 0:
+            raise ValueError('cache_entries must be a nonnegative integer')
+        self.cache_entries = cache_entries
+        self._counts = OrderedDict()
+        self.cache_hits = self.cache_misses = 0
         self.count_tokens = count_tokens or (lambda text: len(text.encode('utf-8')))
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
         self.memory = []
         self.task = None
 
+    @property
+    def count_tokens(self):
+        return self._count
+
+    @count_tokens.setter
+    def count_tokens(self, counter):
+        if not callable(counter):
+            raise ValueError('Token counter must be callable')
+        self._counter = counter
+        self._counts.clear()
+        self.cache_hits = self.cache_misses = 0
+
+    def _count(self, text):
+        key = hashlib.sha256(text.encode('utf-8')).digest()
+        if key in self._counts:
+            self.cache_hits += 1
+            self._counts.move_to_end(key)
+            return self._counts[key]
+        value = self._counter(text)
+        if type(value) is not int or value < 0:
+            raise ValueError('Token counter returned an invalid count')
+        self.cache_misses += 1
+        if self.cache_entries:
+            self._counts[key] = value
+            if len(self._counts) > self.cache_entries:
+                self._counts.popitem(last=False)
+        return value
+
     def size(self, messages, schemas):
-        # Include schemas, framing, and a margin for model-specific chat templates.
-        return self.count_tokens(json.dumps({'messages': messages, 'tools': schemas}, ensure_ascii=False)) + 256
+        # Cache immutable fragments, not object identities. This estimate reserves
+        # per-message framing and boundary margins; it is not an exact chat-template
+        # token count. Mutation, compaction, or tokenizer changes cannot hit stale entries.
+        encode = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        return (sum(self.count_tokens(encode(m)) + 16 for m in messages)
+                + self.count_tokens(encode(schemas)) + 256)
 
     def fit(self, messages, schemas, reserve):
         limit = self.window - reserve
@@ -121,7 +159,7 @@ class ContextManager:
         return output[:1800] + '\n[output truncated]\n' + output[-1200:] + '\n' + reference
 
 
-def repository_instructions(root, target=None):
+def repository_instructions(root, target=None, include_root=True):
     root = Path(root).resolve()
     target = Path(target).resolve() if target else root
     if not target.is_relative_to(root):
@@ -132,6 +170,8 @@ def repository_instructions(root, target=None):
     if directory != root:
         chain.append(directory)
     for folder in chain:
+        if folder == root and not include_root:
+            continue
         path = folder / 'AGENTS.md'
         if path.is_file() and path.resolve().is_relative_to(root):
             parts.append(f'Instructions for {folder.relative_to(root)}:\n' + path.read_text()[:8000])

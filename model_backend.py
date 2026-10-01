@@ -3,14 +3,86 @@ import json
 import os
 import urllib.request
 import threading
+import time
 from urllib.parse import urlparse
+
+
+TUNING_INTS = ('n_threads', 'n_threads_batch', 'n_batch', 'n_ubatch')
+KV_TYPES = ('f16', 'q8_0', 'q4_0')
+
+
+def validate_tuning(profile):
+    mode = profile.get('speculative_mode', 'off')
+    if mode not in ('off', 'prompt-lookup', 'draft-model'):
+        raise ValueError('speculative_mode must be off, prompt-lookup, or draft-model')
+    for key, limit in (('draft_tokens', 32), ('draft_ngram_size', 8)):
+        value = profile.get(key, 8 if key == 'draft_tokens' else 2)
+        if type(value) is not int or not 1 <= value <= limit:
+            raise ValueError(f'{key} must be between 1 and {limit}')
+    if mode != 'off' and profile.get('backend', 'embedded') != 'embedded':
+        raise ValueError('Configure speculative decoding on the external server; these options are embedded-only')
+    if mode == 'draft-model' and not isinstance(profile.get('draft_model_path'), str):
+        raise ValueError('draft-model mode requires draft_model_path')
+    if type(profile.get('draft_n_gpu_layers', 0)) is not int or profile.get('draft_n_gpu_layers', 0) < -1:
+        raise ValueError('draft_n_gpu_layers must be -1 or a nonnegative integer')
+    if type(profile.get('prompt_cache_mb', 0)) is not int or not 0 <= profile.get('prompt_cache_mb', 0) <= 4096:
+        raise ValueError('prompt_cache_mb must be between 0 and 4096')
+    if 'server_cache_prompt' in profile and type(profile['server_cache_prompt']) is not bool:
+        raise ValueError('server_cache_prompt must be a boolean')
+    for key in TUNING_INTS:
+        value = profile.get(key)
+        if value is not None and (type(value) is not int or value < 1):
+            raise ValueError(f'{key} must be a positive integer')
+    if profile.get('n_batch') and profile.get('n_ubatch') and profile['n_ubatch'] > profile['n_batch']:
+        raise ValueError('n_ubatch cannot exceed n_batch')
+    for key in ('type_k', 'type_v'):
+        if profile.get(key) is not None and profile[key] not in KV_TYPES:
+            raise ValueError(f'{key} must be one of {KV_TYPES}')
+    if 'flash_attn' in profile and type(profile['flash_attn']) is not bool:
+        raise ValueError('flash_attn must be a boolean')
+    if profile.get('type_v', 'f16') != 'f16' and not profile.get('flash_attn'):
+        raise ValueError('Quantized value cache requires flash_attn')
 
 
 class ModelAdapter:
     def __init__(self, profile):
-        self.profile = profile
+        validate_tuning(profile)
+        self.profile = dict(profile)
         self.emit = lambda event: None
         self.cancel_event = None
+        self._first_output = None
+        self.load_seconds = 0.0
+
+    def create_chat_completion(self, **kwargs):
+        # Canonicalize dictionaries and tool ordering, never conversation order.
+        if 'messages' in kwargs:
+            kwargs['messages'] = json.loads(json.dumps(kwargs['messages'], sort_keys=True))
+        if 'tools' in kwargs:
+            kwargs['tools'] = sorted(json.loads(json.dumps(kwargs['tools'], sort_keys=True)),
+                                     key=lambda t: t.get('function', {}).get('name', ''))
+        started = time.perf_counter()
+        old_load = self.load_seconds
+        self._first_output = None
+        response = self._complete(**kwargs)
+        elapsed = time.perf_counter() - started
+        usage = response.get('usage') or {}
+        metrics = {'elapsed_seconds': elapsed, 'load_seconds': self.load_seconds - old_load,
+                   'time_to_first_output_seconds': self._first_output - started if self._first_output else None,
+                   'prompt_tokens': usage.get('prompt_tokens'), 'completion_tokens': usage.get('completion_tokens'),
+                   'cached_prompt_tokens': (usage.get('prompt_tokens_details') or {}).get('cached_tokens'),
+                   'prompt_tokens_per_second': None, 'generation_tokens_per_second': None,
+                   'end_to_end_completion_tokens_per_second': usage.get('completion_tokens') / elapsed
+                       if type(usage.get('completion_tokens')) is int and elapsed > 0 else None}
+        metrics.update(self.backend_metrics())
+        response['performance'] = metrics
+        self.emit({'type': 'inference_metrics', **metrics})
+        return response
+
+    def close(self):
+        """Release owned resources. Remote adapters do not own their server."""
+
+    def backend_metrics(self):
+        return {}
 
     def count_tokens(self, text):
         # Conservative fallback for servers without a tokenizer API.
@@ -26,6 +98,8 @@ class ModelAdapter:
                 if choice.get('index', 0) != 0:
                     continue
                 delta = choice.get('delta', {})
+                if (delta.get('content') or delta.get('tool_calls')) and self._first_output is None:
+                    self._first_output = time.perf_counter()
                 if delta.get('content'):
                     content.append(delta['content'])
                     self.emit({'type': 'assistant_delta', 'text': delta['content']})
@@ -50,6 +124,7 @@ class EmbeddedModel(ModelAdapter):
         super().__init__(profile)
         self._model = None
         self._lock = threading.RLock()
+        self._draft = None
 
     def load(self):
         if self._model is None:
@@ -57,20 +132,81 @@ class EmbeddedModel(ModelAdapter):
             kwargs = {key: self.profile[key] for key in ('model_path', 'n_ctx', 'n_gpu_layers')}
             if self.profile.get('chat_format'):
                 kwargs['chat_format'] = self.profile['chat_format']
-            self._model = Llama(**kwargs, verbose=False)
+            kwargs.update({k: self.profile[k] for k in TUNING_INTS + ('flash_attn',) if self.profile.get(k) is not None})
+            if 'n_batch' in kwargs and 'n_ubatch' not in kwargs:
+                kwargs['n_ubatch'] = min(kwargs['n_batch'], 512)
+            from llama_cpp import llama_cpp
+            for key in ('type_k', 'type_v'):
+                if self.profile.get(key) is not None:
+                    kwargs[key] = getattr(llama_cpp, 'GGML_TYPE_' + self.profile[key].upper())
+            kwargs['no_perf'] = False
+            started = time.perf_counter()
+            mode = self.profile.get('speculative_mode', 'off')
+            if mode == 'prompt-lookup':
+                from llama_cpp.llama_speculative import LlamaPromptLookupDecoding
+                kwargs['draft_model'] = LlamaPromptLookupDecoding(
+                    max_ngram_size=self.profile.get('draft_ngram_size', 2),
+                    num_pred_tokens=self.profile.get('draft_tokens', 8))
+            elif mode == 'draft-model':
+                from speculative import SmallModelDraft
+                draft = Llama(model_path=self.profile['draft_model_path'], n_ctx=self.profile['n_ctx'],
+                              n_gpu_layers=self.profile.get('draft_n_gpu_layers', 0),
+                              n_threads=self.profile.get('n_threads'), verbose=False)
+                self._draft = SmallModelDraft(draft, self.profile.get('draft_tokens', 8))
+                kwargs['draft_model'] = self._draft
+            try:
+                self._model = Llama(**kwargs, verbose=False)
+                if self._draft:
+                    self._draft.verify(self._model)
+                if self.profile.get('prompt_cache_mb', 0):
+                    from llama_cpp import LlamaRAMCache
+                    self._model.set_cache(LlamaRAMCache(capacity_bytes=self.profile['prompt_cache_mb'] * 1024 * 1024))
+            except Exception:
+                if self._model is not None:
+                    self._model.close()
+                    self._model = None
+                if self._draft:
+                    self._draft.close()
+                    self._draft = None
+                raise
+            self.load_seconds += time.perf_counter() - started
+            self.emit({'type': 'model_loaded', 'load_seconds': self.load_seconds})
         return self._model
 
     def count_tokens(self, text):
         with self._lock:
             return len(self.load().tokenize(text.encode('utf-8')))
 
-    def create_chat_completion(self, **kwargs):
+    def _complete(self, **kwargs):
         if not self.profile.get('supports_tools', True):
             kwargs.pop('tools', None)
         kwargs['stream'] = self.profile.get('stream', True)
         with self._lock:
-            result = self.load().create_chat_completion(**kwargs)
+            model = self.load()
+            from llama_cpp import llama_cpp
+            if hasattr(model, '_ctx'):
+                llama_cpp.llama_perf_context_reset(model._ctx.ctx)
+            result = model.create_chat_completion(**kwargs)
             return self.collect(result) if kwargs['stream'] else result
+
+    def close(self):
+        with self._lock:
+            if self._model is not None:
+                self._model.close()
+                self._model = None
+            if self._draft is not None:
+                self._draft.close()
+                self._draft = None
+
+    def backend_metrics(self):
+        try:
+            from llama_cpp import llama_cpp
+            stats = llama_cpp.llama_perf_context(self._model._ctx.ctx)
+            return {'prompt_tokens_per_second': stats.n_p_eval / (stats.t_p_eval_ms / 1000) if stats.t_p_eval_ms > 0 else None,
+                    'generation_tokens_per_second': stats.n_eval / (stats.t_eval_ms / 1000) if stats.t_eval_ms > 0 else None,
+                    'evaluated_prompt_tokens': stats.n_p_eval, 'evaluated_generation_tokens': stats.n_eval}
+        except (AttributeError, TypeError):
+            return {}
 
 
 class OpenAIModel(ModelAdapter):
@@ -82,11 +218,15 @@ class OpenAIModel(ModelAdapter):
             raise ValueError('base_url must be an HTTP(S) URL without embedded credentials')
         self.url = base + '/chat/completions'
 
-    def create_chat_completion(self, **kwargs):
+    def _complete(self, **kwargs):
         kwargs['model'] = self.profile.get('model', 'local-model')
+        if self.profile.get('server_cache_prompt'):
+            kwargs['cache_prompt'] = True
         kwargs['stream'] = self.profile.get('stream', True)
         if not self.profile.get('supports_tools', True):
             kwargs.pop('tools', None)
+        if kwargs['stream']:
+            kwargs['stream_options'] = {'include_usage': True}
         headers = {'Content-Type': 'application/json'}
         key_name = self.profile.get('api_key_env', 'LOCAL_CODER_API_KEY')
         if os.environ.get(key_name):

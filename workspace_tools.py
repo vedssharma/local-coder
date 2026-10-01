@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 
 def schema(name, description, properties, required=()):
@@ -34,9 +35,20 @@ SCHEMAS = [
     schema('git_diff', 'Show tracked changes from HEAD and list untracked workspace files.', {}),
 ]
 
+READ_REQUEST = {'type': 'object', 'properties': {'path': STRING, 'start_line': INTEGER, 'end_line': INTEGER},
+                'required': ['path'], 'additionalProperties': False}
+SEARCH_REQUEST = {'type': 'object', 'properties': {'pattern': STRING, 'path': STRING, 'glob': STRING},
+                  'required': ['pattern'], 'additionalProperties': False}
+SCHEMAS += [
+    schema('batch_read', 'Read up to eight independent file ranges in one call, in input order.',
+           {'requests': {'type': 'array', 'items': READ_REQUEST, 'minItems': 1, 'maxItems': 8}}, ['requests']),
+    schema('batch_search', 'Run up to eight independent content searches in one call, in input order.',
+           {'requests': {'type': 'array', 'items': SEARCH_REQUEST, 'minItems': 1, 'maxItems': 8}}, ['requests']),
+]
+
 
 MODES = ('read-only', 'workspace-edit', 'execute')
-READ_TOOLS = {'read_file', 'list_directory', 'search_code', 'git_diff'}
+READ_TOOLS = {'read_file', 'list_directory', 'search_code', 'git_diff', 'batch_read', 'batch_search'}
 MCP_READ_TOOLS = {'read_text_file', 'read_multiple_files', 'directory_tree', 'get_file_info',
                   'list_allowed_directories', 'search_files', 'list_directory_with_sizes'}
 
@@ -85,12 +97,40 @@ class WorkspaceTools:
             allowed |= {'run_command', 'poll_process', 'cancel_process'}
         return [s for s in SCHEMAS if s['function']['name'] in allowed] + extra
 
+    def selected_schemas(self, task_kind='auto'):
+        if task_kind == 'auto':
+            task_kind = 'inspect' if self.mode == 'read-only' else 'code'
+        if task_kind not in ('answer', 'inspect', 'code', 'all'):
+            raise ValueError('task_kind must be auto, answer, inspect, code, or all')
+        schemas = self.get_openai_tool_schemas()
+        if task_kind == 'answer':
+            return []
+        if task_kind == 'inspect':
+            names = {'read_file', 'list_directory', 'search_code', 'batch_read', 'batch_search'}
+            return [s for s in schemas if s['function']['name'] in names]
+        if task_kind == 'code':
+            return [s for s in schemas if s['function']['name'] in {s['function']['name'] for s in SCHEMAS}]
+        return schemas
+
     def call_tool(self, name, args):
         try:
             self.authorize(name, args)
+            if name in ('batch_read', 'batch_search'):
+                requests = args['requests']
+                if not isinstance(requests, list) or not 1 <= len(requests) <= 8:
+                    raise ValueError('A batch must contain 1 to 8 requests')
+                child = 'read_file' if name == 'batch_read' else 'search_code'
+                # Only pure reads/searches are parallelized. Duplicate entries share
+                # one execution; each request still gets its ordered result.
+                unique = {json.dumps(a, sort_keys=True): a for a in requests}
+                with ThreadPoolExecutor(max_workers=min(4, len(unique))) as pool:
+                    futures = {key: pool.submit(self.call_tool, child, value) for key, value in unique.items()}
+                    results = {key: future.result() for key, future in futures.items()}
+                return json.dumps([{'request': value, 'output': results[json.dumps(value, sort_keys=True)]}
+                                   for value in requests])
             if name == 'read_file':
                 p = self.path(args['path'])
-                start, end = args.get('start_line', 1), args.get('end_line', 200)
+                start, end = args.get('start_line', 1), args.get('end_line', args.get('start_line', 1) + 99)
                 if start < 1 or end < start or end - start > 1000:
                     raise ValueError('Use a range of at most 1001 lines')
                 lines = []
@@ -101,7 +141,7 @@ class WorkspaceTools:
                         if n >= start:
                             lines.append(f'{n}: {line}')
                 from session import repository_instructions
-                instructions = repository_instructions(self.root, p)
+                instructions = repository_instructions(self.root, p, include_root=False)
                 result = ''.join(lines)[:32000] or '(empty file)'
                 return result + ('\n\n' + instructions if instructions else '')
             if name == 'list_directory':

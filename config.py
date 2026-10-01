@@ -52,7 +52,7 @@ def save_config(config: dict):
 
 def get_model_path() -> str:
     """Get the current model path from config."""
-    config = load_config()
+    config = get_model_config()
     return config.get("model_path", DEFAULT_CONFIG["model_path"])
 
 
@@ -74,12 +74,81 @@ def set_model_path(path: str) -> bool:
     if not path.lower().endswith('.gguf'):
         return False
 
-    config = load_config()
-    config["model_path"] = path
-    save_config(config)
+    update_model_config({"model_path": path})
     return True
 
 
-def get_model_config() -> dict:
+def get_model_config(name=None, task_kind=None, use_routes=False) -> dict:
     """Get the full model configuration."""
-    return load_config()
+    return resolve_model_config(load_config(), name, task_kind, use_routes)
+
+
+def _profile_name(name):
+    import re
+    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name):
+        raise ValueError('Profile names use 1-64 letters, numbers, underscores, or hyphens')
+    return name
+
+
+def resolve_model_config(data, name=None, task_kind=None, use_routes=False):
+    base = {k: v for k, v in data.items() if k not in ('profiles', 'routes', 'active_profile')}
+    if name == 'default':
+        return base
+    selected = name
+    if selected is None and use_routes:
+        selected = data.get('routes', {}).get(task_kind)
+    selected = selected or data.get('active_profile')
+    base = {k: v for k, v in data.items() if k not in ('profiles', 'routes', 'active_profile')}
+    if selected:
+        _profile_name(selected)
+        if selected not in data.get('profiles', {}):
+            raise ValueError(f'Unknown model profile: {selected}')
+        base = {**DEFAULT_CONFIG, **data['profiles'][selected]}
+    return base
+
+
+def update_model_config(updates):
+    data = load_config()
+    selected = data.get('active_profile')
+    if selected:
+        current = resolve_model_config(data)
+        current.update(updates)
+        data.setdefault('profiles', {})[selected] = current
+    else:
+        data.update(updates)
+    save_config(data)
+
+
+def save_profile(name):
+    name = _profile_name(name)
+    if name == 'default':
+        raise ValueError('default is reserved for the base configuration')
+    data = load_config()
+    data.setdefault('profiles', {})[name] = resolve_model_config(data)
+    save_config(data)
+
+
+def activate_profile(name):
+    data = load_config()
+    if name == 'default':
+        data.pop('active_profile', None)
+    else:
+        _profile_name(name)
+        if name not in data.get('profiles', {}):
+            raise ValueError(f'Unknown model profile: {name}')
+        data['active_profile'] = name
+    save_config(data)
+
+
+def set_route(task_kind, name):
+    if task_kind not in ('answer', 'inspect', 'code'):
+        raise ValueError('Routes apply to answer, inspect, or code tasks')
+    data = load_config()
+    if name == 'default':
+        data.setdefault('routes', {}).pop(task_kind, None)
+    else:
+        _profile_name(name)
+        if name not in data.get('profiles', {}):
+            raise ValueError(f'Unknown model profile: {name}')
+        data.setdefault('routes', {})[task_kind] = name
+    save_config(data)

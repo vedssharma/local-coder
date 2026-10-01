@@ -24,3 +24,5 @@ Launch from the project to work on; the server resolves its own Python imports s
 `ask`, `chat`, and `edit` return structured results including `status`, `text`, and `session_id`. Continue with `chat(message="...", session_id="...")`. Sessions persist across server restarts and preserve tool observations. `edit` and `set_model` are blocked in read-only mode. `set_model(path="...")` accepts a workspace-local GGUF.
 
 To smoke-test transport, connect an MCP client, initialize the session, list tools, and call `get_model`. This tests discovery/configuration, not model inference. Running the script directly waits for MCP JSON-RPC on stdin.
+
+Coding tools accept an optional `profile` naming an existing saved model configuration. The server keeps one model loaded at a time, releases it on profile changes, and uses that profile’s context limit. Profile selection never changes executor permissions.

@@ -139,3 +139,65 @@ Reports record success checks, changed files, observed command exit codes, tool 
 - `skills/local-coder/scripts/server.py`: MCP interface to the same runtime.
 
 Dependencies and inference behavior are covered by separate checks. The native MCP SDK is constrained to 1.x because this repository uses its 1.x result API.
+
+## Inference measurements and tuning
+
+```bash
+python main.py models --threads 4 --batch-threads 4 --batch-size 512 --micro-batch-size 256
+python main.py models --flash-attention --key-cache-type q8_0 --value-cache-type q8_0
+python main.py benchmark --output /tmp/inference.json --warmups 1 --repeats 3
+```
+
+Thread, batch, attention, and KV-cache options apply to embedded inference. KV types are `f16`, `q8_0`, or `q4_0`; quantized value caches require Flash Attention. Backend/platform support still determines whether a setting works. Benchmark before adopting a setting; larger batches are not always faster.
+
+Reports retain individual samples and medians for request latency, load time, first streamed output, and available native prompt/generation throughput. Unsupported rates remain null; server end-to-end latency is not mislabeled as decode speed. A warm-up excludes model loading from the sampled steady-state requests; use `--warmups 0` to include a cold first request. Run results also contain total, context preparation, model, and tool timings and call counts. Real benchmarks require a configured model.
+
+`--task-kind auto` exposes inspection tools in read-only mode and native coding tools in edit/execute modes. Use `answer` for a tool-free question, `inspect` for reads/searches, `code` for permitted native tools, or `all` to include optional MCP reads. Selection narrows capabilities; it never grants permissions. Default reads return 100 lines, `@file` preloads are bounded to 8 KB, and unchanged preloads already retained in the transcript are not injected twice. Changed files and references whose old context was compacted away are injected again.
+
+`batch_read` and `batch_search` accept up to eight independent requests and return results in request order. Up to four reads/searches run concurrently; edits and commands remain ordered. Duplicate reads within one model response share an execution. Reads across steps execute again to detect changes, but identical retained observations are referenced instead of appended in full. Errors and command results are never reused.
+
+Prompt dictionaries and tool ordering are canonicalized without reordering conversation turns. Embedded llama.cpp keeps its live prefix state; `models --prompt-cache-mb 128` additionally enables a bounded in-memory llama.cpp state cache (`0` disables it). Cached model states may contain prompt data and are never written to disk. `--server-cache-prompt` is an explicit opt-in for servers that support the nonstandard `cache_prompt` request field; generic OpenAI servers receive no such field by default. API-reported cached prompt tokens are recorded when available. Stable prefixes improve the opportunity for reuse but do not guarantee cache hits or speedups.
+
+### Persistent one-shot inference
+
+On Unix platforms, `python main.py ask "question" --persistent` starts or reuses a private embedded-inference daemon. Subsequent CLI processes share its loaded model and prefix cache. File tools and permissions remain in each CLI process; the daemon accepts only inference and tokenization requests. Its socket and profile snapshot are private to your user. Startup is serialized and a mismatched profile is rejected instead of silently using another model.
+
+Use `python main.py inference-server` for foreground operation, or `python main.py inference-server --stop` to stop it (including after changing configuration). Stop/restart after tuning or model changes. The daemon remains alive after a one-shot command; it occupies model memory until stopped. Logs and the socket live under `LOCAL_CODER_CONFIG_DIR`. Server backends already retain models and do not use this daemon.
+
+Token budgeting uses a bounded in-memory cache of counts for serialized message and schema fragments. It reuses unchanged fragments, invalidates changed contents, and clears when the tokenizer changes. Framing/boundary margins remain conservative; this is an estimate rather than an exact model-specific chat-template count. Run metrics expose cache hits/misses. Cached and uncached budgeting use the same estimate, and the cache stores hashes/counts rather than prompt text.
+
+### Named models and explicit routing
+
+Configure/download each model first, then save a snapshot:
+
+```bash
+python main.py profiles save small
+# Change model/tuning, then:
+python main.py profiles save large
+python main.py profiles use small
+python main.py profiles route answer small
+python main.py profiles route code large
+python main.py ask "question" --task-kind answer --route
+python main.py edit "fix the tests" --mode execute --profile large
+python main.py benchmark --compare small --compare large --output /tmp/comparison.json
+python evaluations/run.py --profile small --allow-execution --output /tmp/small-quality.json
+```
+
+`--profile` overrides routing. Routes are used only with `--route` and choose a model once at task startup; there is no hidden difficulty classifier or mid-turn model swap. Without routing, the active profile (or the base `default`) is used. `profiles use default` restores the base configuration; `profiles route code default` clears that route. Subsequent `models` changes update the active named profile while preserving other profiles. Named snapshots do not inherit later base tuning changes. Comparisons run sequentially, release each model, and record settings and raw samples. Compare coding success as well as latency before choosing a smaller/quantized model. A private daemon retains one profile at a time and requires stop/restart when switching.
+
+### Speculative decoding
+
+```bash
+# Reuse matching text sequences from the prompt; no second model required.
+python main.py models --speculative-mode prompt-lookup --draft-tokens 8 --draft-ngram-size 2
+
+# Use a compatible smaller GGUF as a learned draft.
+python main.py models --speculative-mode draft-model --draft-model /path/to/draft.gguf --draft-tokens 8
+
+# Disable and compare against the baseline.
+python main.py models --speculative-mode off
+```
+
+These modes use llama-cpp-python's target-verified draft callback. Prompt lookup is useful only when the prompt contains matching continuations. Learned drafts must match tokenizer metadata, vocabulary/token IDs, and tokenization checks; incompatible models are rejected and released. Both models must fit in memory; speculative decoding also enables additional target logits storage and can be slower than the baseline. The draft defaults to CPU; `--draft-gpu-layers` controls its offload independently. No draft is loaded unless explicitly enabled. External-server speculation must be configured using that server's supported startup options; this client does not send invented portable draft parameters.
+
+Use named baseline/speculative profiles with `benchmark --compare`, then compare coding evaluations. Native throughput describes native target evaluation; `end_to_end_completion_tokens_per_second` includes full request time (including draft work, prefill, and loading where applicable). This distinction matters for speculative decoding. `benchmark --persistent` measures the private daemon; multi-profile comparisons require non-persistent inference or explicit daemon restarts. Real model measurements remain necessary before claiming a speedup.

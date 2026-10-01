@@ -20,22 +20,29 @@ from workspace_tools import WorkspaceTools
 
 mcp = FastMCP('local-coder')
 _model = None
+_model_signature = None
 _lock = threading.RLock()
 
 
-def get_model_instance():
-    global _model
-    if _model is None:
-        _model = create_model(config.get_model_config())
+def get_model_instance(profile_name=None):
+    global _model, _model_signature
+    import json
+    profile = config.get_model_config(profile_name)
+    signature = json.dumps(profile, sort_keys=True)
+    if _model is None or signature != _model_signature:
+        if _model is not None:
+            _model.close()
+        _model = create_model(profile)
+        _model_signature = signature
     return _model
 
 
-def run_turn(prompt, files=None, session_id=None, max_tokens=512):
+def run_turn(prompt, files=None, session_id=None, max_tokens=512, profile_name=None):
     # One model/session write at a time. No shared mutable transcripts across callers.
     with _lock:
-        with Runtime(get_model_instance(), os.getcwd(), config.CONFIG_DIR,
+        with Runtime(get_model_instance(profile_name), os.getcwd(), config.CONFIG_DIR,
                      mode=os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only'),
-                     context_window=config.get_model_config()['n_ctx']) as runtime:
+                     context_window=config.get_model_config(profile_name)['n_ctx']) as runtime:
             if session_id:
                 runtime.resume(session_id)
             original, contents = parse_file_references(prompt, root=runtime.tools.root)
@@ -48,23 +55,23 @@ def run_turn(prompt, files=None, session_id=None, max_tokens=512):
 
 
 @mcp.tool()
-def ask(prompt: str, files: list[str] | None = None, max_tokens: int = 512) -> dict:
+def ask(prompt: str, files: list[str] | None = None, max_tokens: int = 512, profile: str | None = None) -> dict:
     """Ask a question; returns text, explicit run status, and a resumable session ID."""
-    return run_turn(prompt, files, max_tokens=max_tokens)
+    return run_turn(prompt, files, max_tokens=max_tokens, profile_name=profile)
 
 
 @mcp.tool()
-def chat(message: str, session_id: str | None = None, max_tokens: int = 512) -> dict:
+def chat(message: str, session_id: str | None = None, max_tokens: int = 512, profile: str | None = None) -> dict:
     """Continue a saved session, retaining tool observations and decisions."""
-    return run_turn(message, session_id=session_id, max_tokens=max_tokens)
+    return run_turn(message, session_id=session_id, max_tokens=max_tokens, profile_name=profile)
 
 
 @mcp.tool()
-def edit(prompt: str, files: list[str] | None = None, max_tokens: int = 2048) -> dict:
+def edit(prompt: str, files: list[str] | None = None, max_tokens: int = 2048, profile: str | None = None) -> dict:
     """Edit using apply_patch; server must be launched in workspace-edit or execute mode."""
     if os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only') == 'read-only':
         return {'status': 'blocked', 'text': 'Server is read-only; restart with LOCAL_CODER_PERMISSION_MODE=workspace-edit or execute.'}
-    return run_turn(prompt, files, max_tokens=max_tokens)
+    return run_turn(prompt, files, max_tokens=max_tokens, profile_name=profile)
 
 
 @mcp.tool()
@@ -87,7 +94,7 @@ def set_model(path: str) -> dict:
         if success:
             profile = config.get_model_config()
             profile['backend'] = 'embedded'
-            config.save_config(profile)
+            config.update_model_config(profile)
             _model = None
         return {'status': 'completed' if success else 'blocked'}
 

@@ -1,5 +1,5 @@
 """Bounded agent execution with explicit, inspectable outcomes."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 import time
@@ -29,6 +29,7 @@ class RunResult:
     steps: int = 0
     generated_tokens: int = 0
     reason: str = ''
+    performance: dict = field(default_factory=dict)
 
 
 def _build_tool_schemas(mcp_client=None):
@@ -38,7 +39,7 @@ def _build_tool_schemas(mcp_client=None):
 
 
 def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
-              cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None):
+              cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None, tool_schemas=None):
     """Run a turn. Completion means the model finished, not that its claims were verified.
 
     Time and cancellation are checked between model/tool operations. Blocking model
@@ -46,17 +47,22 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     """
     budget = budget or RunBudget()
     emit = emit or (lambda event: None)
-    schemas = _build_tool_schemas(mcp_client)
+    schemas = _build_tool_schemas(mcp_client) if tool_schemas is None else tool_schemas
     from model_backend import ModelAdapter
     if isinstance(llm, ModelAdapter) and not llm.profile.get("supports_tools", True):
         schemas = []
+    schemas = sorted(schemas, key=lambda s: s['function']['name'])
     registered = {s['function']['name']: s['function'].get('parameters', {'type': 'object'})
                   for s in schemas}
     context_manager = context_manager or ContextManager(window=32768)
     started, generated, failures, steps = time.monotonic(), 0, {}, 0
 
+    observations = {}
+    metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0}
+
     def finish(status, text, reason=''):
-        result = RunResult(status, text, steps, generated, reason)
+        result = RunResult(status, text, steps, generated, reason, {**metrics, 'total_seconds': time.monotonic() - started,
+            'token_cache_hits': context_manager.cache_hits, 'token_cache_misses': context_manager.cache_misses})
         emit({'type': 'run_finished', 'status': status, 'reason': reason})
         return result
 
@@ -77,8 +83,13 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         if schemas:
             kwargs['tools'] = schemas
         try:
+            phase = time.monotonic()
             context_manager.fit(messages, schemas, kwargs['max_tokens'])
+            metrics['context_seconds'] += time.monotonic() - phase
+            phase = time.monotonic()
+            metrics['model_calls'] += 1
             response = llm.create_chat_completion(**kwargs)
+            metrics['model_seconds'] += time.monotonic() - phase
             choice = response['choices'][0]
             message = choice['message']
             if not isinstance(message, dict):
@@ -115,6 +126,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
         # Validate the envelope before appending it so transcripts remain resumable.
         ids = set()
+        prior_ids = {m['tool_call_id'] for m in messages if m.get('role') == 'tool'}
         for call in calls:
             if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
                 return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
@@ -123,10 +135,13 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 return finish('blocked', 'Model returned an invalid tool call ID.', 'invalid_protocol')
             if key in ids:
                 return finish('blocked', 'Model returned duplicate tool call IDs.', 'invalid_protocol')
+            if key in prior_ids:
+                key = f'{key}_{step}_{len(ids)}'
             call['id'] = key
             ids.add(key)
         messages.append(message)
         halt = None
+        read_cache = {}
         for call in calls:
             name = call['function'].get('name')
             raw = call['function'].get('arguments')
@@ -141,7 +156,20 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                     raise ValueError(f'Unknown or unavailable tool: {name}')
                 args = json.loads(raw) if isinstance(raw, str) else raw
                 validate(args, registered[name])
-                output = mcp_client.call_tool(name, args) or '(empty result)'
+                phase = time.monotonic()
+                metrics['tool_calls'] += 1
+                cache_key = json.dumps([name, args], sort_keys=True)
+                read_names = {'read_file', 'search_code', 'list_directory', 'batch_read', 'batch_search'}
+                if name in read_names and cache_key in read_cache:
+                    output = read_cache[cache_key]
+                    emit({'type': 'tool_reused', 'name': name, 'call_id': call['id']})
+                else:
+                    output = mcp_client.call_tool(name, args) or '(empty result)'
+                    if name in read_names and not str(output).startswith('Error:'):
+                        read_cache[cache_key] = output
+                    if name not in read_names:
+                        read_cache.clear()
+                metrics['tool_seconds'] += time.monotonic() - phase
                 output = str(output)
             except (ValueError, TypeError, ValidationError) as exc:
                 output = f'Error: invalid tool call: {exc}'
@@ -150,6 +178,16 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 output = 'Error: tool interrupted'
             except Exception as exc:
                 output = f'Error: tool failed: {exc}'
+            # Retain one full identical observation in the active transcript.
+            # Fresh execution across steps observes external edits before deduplication.
+            original_output = output
+            if name in ('read_file', 'list_directory', 'batch_read') and not output.startswith('Error:'):
+                observation_key = json.dumps([name, args], sort_keys=True)
+                previous = observations.get(observation_key)
+                if previous and previous[1] == output and any(m.get('tool_call_id') == previous[0] for m in messages):
+                    output = f"Unchanged observation; see tool result {previous[0]}."
+                else:
+                    observations[observation_key] = (call['id'], original_output)
             output = context_manager.bound_output(output)
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': output})
             emit({'type': 'tool_finished', 'name': name, 'call_id': call['id'], 'output': output})

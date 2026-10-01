@@ -22,12 +22,9 @@ def _load_context_md(root=None):
 
 def build_system_message(root=None):
     base = (
-        "You are an expert coding assistant with access to filesystem tools.\n"
-        "Use available tools to inspect files before making claims about them. "
-        "Never guess file contents. If a required tool is unavailable, explain the limitation. "
-        "For listing files, call list_directory. For reading files, call read_file. "
-        "For searching file contents, call search_code. "
-        "Use apply_patch for targeted edits. Run relevant checks with run_command, poll until exit, and inspect git_diff before reporting verified changes."
+        "You are a coding assistant. Inspect files with read_file, list_directory, or search_code; never guess their contents. "
+        "Use available tools only. Batch independent reads/searches; do not repeat unchanged observations. Make targeted apply_patch edits, verify with run_command when permitted, "
+        "poll commands to completion, and inspect git_diff. Distinguish observed check results from assumptions."
     )
 
     instructions = repository_instructions(root or os.getcwd())
@@ -60,7 +57,7 @@ def build_user_message(prompt, file_contents):
         return {"role": "user", "content": prompt}
 
     context_parts = []
-    for file_path, content in file_contents.items():
+    for file_path, content in sorted(file_contents.items()):
         context_parts.append(f"<file path='{file_path}'>\n{content}\n</file>")
     context = "\n\n".join(context_parts)
 
