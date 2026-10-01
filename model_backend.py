@@ -12,6 +12,10 @@ KV_TYPES = ('f16', 'q8_0', 'q4_0')
 
 
 def validate_tuning(profile):
+    if type(profile.get('prompt_cache_mb', 0)) is not int or not 0 <= profile.get('prompt_cache_mb', 0) <= 4096:
+        raise ValueError('prompt_cache_mb must be between 0 and 4096')
+    if 'server_cache_prompt' in profile and type(profile['server_cache_prompt']) is not bool:
+        raise ValueError('server_cache_prompt must be a boolean')
     for key in TUNING_INTS:
         value = profile.get(key)
         if value is not None and (type(value) is not int or value < 1):
@@ -37,6 +41,12 @@ class ModelAdapter:
         self.load_seconds = 0.0
 
     def create_chat_completion(self, **kwargs):
+        # Canonicalize dictionaries and tool ordering, never conversation order.
+        if 'messages' in kwargs:
+            kwargs['messages'] = json.loads(json.dumps(kwargs['messages'], sort_keys=True))
+        if 'tools' in kwargs:
+            kwargs['tools'] = sorted(json.loads(json.dumps(kwargs['tools'], sort_keys=True)),
+                                     key=lambda t: t.get('function', {}).get('name', ''))
         started = time.perf_counter()
         old_load = self.load_seconds
         self._first_output = None
@@ -46,6 +56,7 @@ class ModelAdapter:
         metrics = {'elapsed_seconds': elapsed, 'load_seconds': self.load_seconds - old_load,
                    'time_to_first_output_seconds': self._first_output - started if self._first_output else None,
                    'prompt_tokens': usage.get('prompt_tokens'), 'completion_tokens': usage.get('completion_tokens'),
+                   'cached_prompt_tokens': (usage.get('prompt_tokens_details') or {}).get('cached_tokens'),
                    'prompt_tokens_per_second': None, 'generation_tokens_per_second': None}
         metrics.update(self.backend_metrics())
         response['performance'] = metrics
@@ -112,6 +123,9 @@ class EmbeddedModel(ModelAdapter):
             kwargs['no_perf'] = False
             started = time.perf_counter()
             self._model = Llama(**kwargs, verbose=False)
+            if self.profile.get('prompt_cache_mb', 0):
+                from llama_cpp import LlamaRAMCache
+                self._model.set_cache(LlamaRAMCache(capacity_bytes=self.profile['prompt_cache_mb'] * 1024 * 1024))
             self.load_seconds += time.perf_counter() - started
             self.emit({'type': 'model_loaded', 'load_seconds': self.load_seconds})
         return self._model
@@ -154,6 +168,8 @@ class OpenAIModel(ModelAdapter):
 
     def _complete(self, **kwargs):
         kwargs['model'] = self.profile.get('model', 'local-model')
+        if self.profile.get('server_cache_prompt'):
+            kwargs['cache_prompt'] = True
         kwargs['stream'] = self.profile.get('stream', True)
         if not self.profile.get('supports_tools', True):
             kwargs.pop('tools', None)

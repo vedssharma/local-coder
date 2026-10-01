@@ -51,6 +51,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     from model_backend import ModelAdapter
     if isinstance(llm, ModelAdapter) and not llm.profile.get("supports_tools", True):
         schemas = []
+    schemas = sorted(schemas, key=lambda s: s['function']['name'])
     registered = {s['function']['name']: s['function'].get('parameters', {'type': 'object'})
                   for s in schemas}
     context_manager = context_manager or ContextManager(window=32768)

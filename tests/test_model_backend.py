@@ -82,3 +82,29 @@ def test_measurements_do_not_invent_token_rates():
     assert report['median']['time_to_first_output_seconds'] is not None
     assert report['median']['generation_tokens_per_second'] is None
     assert report['all_completed']
+
+
+def test_cache_configuration_and_stable_tool_prefix(monkeypatch):
+    from unittest.mock import MagicMock
+    import llama_cpp
+    from model_backend import EmbeddedModel
+    fake = MagicMock()
+    cache = MagicMock()
+    monkeypatch.setattr(llama_cpp, 'Llama', lambda **kwargs: fake)
+    monkeypatch.setattr(llama_cpp, 'LlamaRAMCache', cache)
+    model = EmbeddedModel({'model_path': 'm.gguf', 'n_ctx': 1024, 'n_gpu_layers': 0, 'prompt_cache_mb': 64})
+    model.load()
+    cache.assert_called_once_with(capacity_bytes=64 * 1024 * 1024)
+    fake.set_cache.assert_called_once()
+    class Capture(ModelAdapter):
+        def _complete(self, **kwargs):
+            self.request = json.dumps(kwargs)
+            return {'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}]}
+    capture = Capture({})
+    tools = [{'function': {'name': 'z', 'parameters': {'b': 1, 'a': 2}}}, {'function': {'name': 'a'}}]
+    capture.create_chat_completion(messages=[{'content': 'question', 'role': 'user'}], tools=tools)
+    first = capture.request
+    capture.create_chat_completion(messages=[{'role': 'user', 'content': 'question'}], tools=list(reversed(tools)))
+    assert capture.request == first
+    capture.create_chat_completion(messages=[{'role': 'user', 'content': 'changed'}], tools=tools)
+    assert capture.request != first

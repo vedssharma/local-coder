@@ -350,6 +350,8 @@ def models(
     flash_attention: bool = typer.Option(None, '--flash-attention/--no-flash-attention'),
     key_cache_type: str = typer.Option(None, '--key-cache-type'),
     value_cache_type: str = typer.Option(None, '--value-cache-type'),
+    prompt_cache_mb: int = typer.Option(None, '--prompt-cache-mb', min=0, max=4096),
+    server_cache_prompt: bool = typer.Option(None, '--server-cache-prompt/--no-server-cache-prompt'),
 ):
     """Show current model or set a new model."""
     global llm
@@ -358,7 +360,8 @@ def models(
                'supports_tools': supports_tools, 'stream': streaming,
                'n_threads': threads, 'n_threads_batch': batch_threads, 'n_batch': batch_size,
                'n_ubatch': micro_batch_size, 'flash_attn': flash_attention,
-               'type_k': key_cache_type, 'type_v': value_cache_type}
+               'type_k': key_cache_type, 'type_v': value_cache_type,
+               'prompt_cache_mb': prompt_cache_mb, 'server_cache_prompt': server_cache_prompt}
     updates = {k: v for k, v in updates.items() if v is not None}
     if updates:
         profile = {**config.get_model_config(), **updates}

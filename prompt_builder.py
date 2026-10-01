@@ -57,7 +57,7 @@ def build_user_message(prompt, file_contents):
         return {"role": "user", "content": prompt}
 
     context_parts = []
-    for file_path, content in file_contents.items():
+    for file_path, content in sorted(file_contents.items()):
         context_parts.append(f"<file path='{file_path}'>\n{content}\n</file>")
     context = "\n\n".join(context_parts)
 
