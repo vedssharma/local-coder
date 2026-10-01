@@ -24,6 +24,7 @@ class ToolSpec:
     default_timeout: int | None = None
     max_timeout: int | None = None
     native: bool = True
+    wait_for_process: bool = False
     validator: object = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -37,6 +38,8 @@ class ToolSpec:
             raise ValueError('Only tools without side effects can reuse observations')
         if self.compact_observation and not self.cacheable:
             raise ValueError('Observation compaction requires a cacheable tool')
+        if self.wait_for_process and self.side_effects != 'process':
+            raise ValueError('Process waiting requires a process tool')
         definition = deepcopy(self.schema)
         parameters = definition['function'].get('parameters', {'type': 'object'})
         validator_class = validator_for(parameters)

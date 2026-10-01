@@ -110,7 +110,7 @@ class WorkspaceTools:
             'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 300}}, ['argv']), self._tool_run_command,
             minimum_mode='execute', side_effects='process', concurrency='serial',
             cacheable=False, compact_observation=False, task_kinds=('code', 'all'),
-            default_timeout=60, max_timeout=300))
+            default_timeout=60, max_timeout=300, wait_for_process=True))
 
         self.registry.register(ToolSpec(
             schema('bash', 'Run a non-interactive Bash command, including pipes and redirects, in the workspace. '
@@ -119,12 +119,12 @@ class WorkspaceTools:
             'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 300}}, ['command']), self._tool_bash,
             minimum_mode='execute', side_effects='process', concurrency='serial',
             cacheable=False, compact_observation=False, task_kinds=('code', 'all'),
-            default_timeout=60, max_timeout=300))
+            default_timeout=60, max_timeout=300, wait_for_process=True))
 
         self.registry.register(ToolSpec(
             schema('poll_process', 'Get command output and exit status.', {'process_id': STRING}, ['process_id']), self._tool_poll_process,
             minimum_mode='execute', side_effects='process', concurrency='serial',
-            cacheable=False, compact_observation=False, task_kinds=('code', 'all')))
+            cacheable=False, compact_observation=False, task_kinds=('code', 'all'), wait_for_process=True))
 
         self.registry.register(ToolSpec(
             schema('cancel_process', 'Terminate a command process group.', {'process_id': STRING}, ['process_id']), self._tool_cancel_process,
@@ -172,8 +172,9 @@ class WorkspaceTools:
     def execute_tool(self, name, args):
         started = time.monotonic()
         try:
-            self.authorize(name, args)
+            self.registry.require(name, self.mode)
             self.registry.validate(name, args)
+            self.authorize(name, args)
             data = self.registry.get(name).handler(args)
             result = data if isinstance(data, ToolResult) else ToolResult(data=data)
         except PermissionError as exc:
@@ -364,11 +365,12 @@ class WorkspaceTools:
                                 start_new_session=True)
         key = uuid.uuid4().hex
         state = {'proc': proc, 'output': b'', 'deadline': time.monotonic() + timeout,
-                 'timed_out': False, 'output_truncated': False, 'lock': threading.Lock()}
+                 'timed_out': False, 'output_truncated': False, 'output_bytes': 0, 'lock': threading.Lock()}
         self.processes[key] = state
         def drain():
             while chunk := proc.stdout.read1(4096):
                 with state['lock']:
+                    state['output_bytes'] += len(chunk)
                     state['output_truncated'] |= len(state['output']) + len(chunk) > 32000
                     state['output'] = (state['output'] + chunk)[-32000:]
             proc.stdout.close()
@@ -394,8 +396,10 @@ class WorkspaceTools:
             state['reader'].join(timeout=0.1)
         with state['lock']:
             output = state['output'].decode(errors='replace')
+            output_bytes = state['output_bytes']
         return {'process_id': key, 'exit_code': code, 'running': code is None,
-                'timed_out': state['timed_out'], 'cancelled': state.get('cancelled', False), 'output_truncated': state['output_truncated'], 'output': output}
+                'timed_out': state['timed_out'], 'cancelled': state.get('cancelled', False),
+                'output_truncated': state['output_truncated'], 'output_bytes': output_bytes, 'output': output}
 
     @staticmethod
     def _kill(state):
@@ -413,10 +417,15 @@ class WorkspaceTools:
         del self.processes[result['process_id']]
         return result
 
-    def close(self):
+    def cancel_all_processes(self):
         for state in self.processes.values():
+            if state['proc'].poll() is None:
+                state['cancelled'] = True
             self._kill(state)
             state['timer'].cancel()
             state['reader'].join(timeout=0.5)
+
+    def close(self):
+        self.cancel_all_processes()
         if self.mcp_client:
             self.mcp_client.close()

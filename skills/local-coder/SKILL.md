@@ -20,3 +20,5 @@ Coding responses contain `status`, `text`, and `session_id`. Check status before
 File references in `@path` form and explicit `files` are confined to the workspace. Embedded inference stays local; a server backend sends context to its configured endpoint.
 
 Use the optional `profile` argument on coding tools to select a saved named model. Check inference benchmarks and coding evaluations before choosing a smaller model for a task.
+
+Commands are briefly polled by the runtime before results reach the model. A returned running process handle is not a completed check; poll it or cancel it. The launch-time `LOCAL_CODER_PROCESS_WAIT_SECONDS` control defaults to 2 seconds.

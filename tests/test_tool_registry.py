@@ -39,6 +39,12 @@ def test_schemas_are_snapshots_and_validator_is_reused(tmp_path):
     assert tools.registry.get('read_file').validator is validator
 
 
+@pytest.mark.parametrize('arguments', [None, [], 'not an object'])
+def test_direct_calls_validate_objects_before_path_checks(tmp_path, arguments):
+    result = WorkspaceTools(tmp_path).execute_tool('read_file', arguments)
+    assert result.status == 'error' and result.error_code == 'invalid_request'
+
+
 def test_registry_rejects_duplicates_and_inconsistent_policies():
     registry = ToolRegistry()
     definition = schema('example', 'Example', {})

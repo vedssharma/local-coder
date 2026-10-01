@@ -3,17 +3,21 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import threading
+import time
 
 from agent import run_agent, RunBudget
 from model_backend import ModelAdapter
 from prompt_builder import build_messages
 from session import ContextManager, SessionStore
 from workspace_tools import WorkspaceTools
+from process_orchestration import ProcessOrchestrator, validate_wait_seconds
 
 
 class Runtime:
     def __init__(self, model, workspace, state_dir, mode='read-only', mcp_client=None,
-                 emit=None, budget=None, context_window=8192, trace=False, task_kind="auto"):
+                 emit=None, budget=None, context_window=8192, trace=False, task_kind="auto",
+                 process_wait_seconds=2):
+        self.process_wait_seconds = validate_wait_seconds(process_wait_seconds)
         self.model = model
         self.tools = WorkspaceTools(workspace, mcp_client=mcp_client, mode=mode)
         self.store = SessionStore(Path(state_dir) / 'sessions', workspace)
@@ -68,14 +72,20 @@ class Runtime:
         if isinstance(self.model, ModelAdapter):
             self.model.emit = self.emit
             self.model.cancel_event = self.cancel_event
+        result = None
+        orchestrator = ProcessOrchestrator(self.tools, self.process_wait_seconds,
+            time.monotonic() + self.budget.max_seconds, self.cancel_event, self.emit)
         try:
             result = run_agent(self.model, self.messages, max_tokens, self.tools,
                                budget=self.budget, cancel_event=self.cancel_event,
                                emit=self.emit, context_manager=self.context,
-                               tool_schemas=self.tools.selected_schemas(self.task_kind))
+                               tool_schemas=self.tools.selected_schemas(self.task_kind),
+                               tool_executor=orchestrator)
             self.emit({'type': 'turn_result', **asdict(result)})
             return result
         finally:
+            if self.cancel_event.is_set() or (result and result.status in ('cancelled', 'budget_exhausted')):
+                self.tools.cancel_all_processes()
             self.store.save(self.messages, self.session_id)
 
     def close(self):
