@@ -46,12 +46,14 @@ def _build_tool_schemas(mcp_client=None):
 
 def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
               cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None, tool_schemas=None,
-              tool_executor=None, execution_context=None, tool_workers=4):
+              tool_executor=None, execution_context=None, tool_workers=4, checkpoint=None, reserved_call_ids=()):
     """Run a turn. Completion means the model finished, not that its claims were verified.
 
     Time and cancellation are checked between model/tool operations. Blocking model
     calls require backend timeouts; this engine never promises to interrupt them.
     """
+    checkpoint = checkpoint or (lambda *a: None)
+    reserved_call_ids = set(reserved_call_ids)
     budget = budget or RunBudget()
     emit = emit or (lambda event: None)
     schemas = _build_tool_schemas(mcp_client) if tool_schemas is None else tool_schemas
@@ -145,7 +147,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
         # Validate the envelope before appending it so transcripts remain resumable.
         ids = set()
-        prior_ids = {m['tool_call_id'] for m in messages if m.get('role') == 'tool'}
+        prior_ids = {m['tool_call_id'] for m in messages if m.get('role') == 'tool'} | set(reserved_call_ids)
         for call in calls:
             if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
                 return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
@@ -156,15 +158,17 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 return finish('blocked', 'Model returned an invalid tool call ID.', 'invalid_protocol')
             if key in ids:
                 return finish('blocked', 'Model returned duplicate tool call IDs.', 'invalid_protocol')
-            if key in prior_ids:
+            while key in prior_ids:
                 key = f'{key}_{step}_{len(ids)}'
             call['id'] = key
             ids.add(key)
+        reserved_call_ids.update(ids)
         messages.append(message)
+        checkpoint('batch', message, None, None)
         halt = None
         scheduler = ToolScheduler(registry, registered,
             tool_executor or (lambda name, args: invoke_tool(mcp_client, name, args)),
-            execution_context, emit, tool_workers)
+            execution_context, emit, tool_workers, checkpoint)
         for call, args, tool_result in scheduler.run(calls):
             name = call['function']['name']
             raw = call['function'].get('arguments')
@@ -186,6 +190,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                     observations[observation_key] = (call['id'], original_output)
             output = tool_result.to_model(context_manager)
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': output})
+            checkpoint('observed',call,args,tool_result)
             emit({'type': 'tool_finished', 'name': name, 'call_id': call['id'], 'output': output, 'result': tool_result.to_dict()})
             fingerprint = json.dumps([name, raw], sort_keys=True)
             if no_progress and not halt:

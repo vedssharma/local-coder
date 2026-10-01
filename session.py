@@ -8,36 +8,72 @@ import tempfile
 import uuid
 from collections import OrderedDict
 from artifact_store import ArtifactStore
+import threading
+import fcntl
+from contextlib import contextmanager
 
 
 class SessionStore:
     def __init__(self, directory, workspace):
         self.directory = Path(directory)
         self.workspace = str(Path(workspace).resolve())
+        self.lock = threading.RLock()
 
-    def save(self, messages, session_id=None):
-        key = session_id or uuid.uuid4().hex
-        path = self._path(key)
-        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        data = {'version': 1, 'workspace': self.workspace, 'messages': messages}
-        with tempfile.NamedTemporaryFile(mode='w', dir=self.directory, delete=False) as f:
-            tmp = Path(f.name)
-            json.dump(data, f)
-        try:
-            tmp.replace(path)
-        finally:
-            tmp.unlink(missing_ok=True)
-        return key
+    def save(self, messages, session_id=None, checkpoint=None):
+        with self.lock:
+            key = session_id or uuid.uuid4().hex
+            path = self._path(key)
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if checkpoint is None and path.exists():
+                checkpoint = json.loads(path.read_text()).get('checkpoint', {})
+            data = {'version': 2, 'workspace': self.workspace, 'messages': messages, 'checkpoint': checkpoint or {}}
+            with tempfile.NamedTemporaryFile(mode='w', dir=self.directory, delete=False) as f:
+                tmp = Path(f.name)
+                json.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                tmp.replace(path)
+                directory_fd = os.open(self.directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                tmp.unlink(missing_ok=True)
+            return key
 
-    def load(self, key):
-        data = json.loads(self._path(key).read_text())
-        if data.get('version') != 1 or data.get('workspace') != self.workspace:
+    def load_state(self, key):
+        with self.lock:
+            data = json.loads(self._path(key).read_text())
+        if data.get('version') not in (1,2) or data.get('workspace') != self.workspace:
             raise ValueError('Session belongs to another workspace or an unsupported version')
         messages = data.get('messages')
         if not isinstance(messages, list) or not all(isinstance(m, dict) and m.get('role') in
             ('system', 'user', 'assistant', 'tool') for m in messages):
             raise ValueError('Invalid session transcript')
-        return messages
+        checkpoint=data.get('checkpoint',{})
+        if not isinstance(checkpoint,dict) or not isinstance(checkpoint.get('calls',{}),dict):
+            raise ValueError('Invalid session checkpoint')
+        return messages,checkpoint
+
+    def load(self, key):
+        return self.load_state(key)[0]
+
+    @contextmanager
+    def lease(self, key):
+        self._path(key)
+        self.directory.mkdir(parents=True,exist_ok=True,mode=0o700)
+        fd=os.open(self.directory/(key+'.lock'), os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError('Session is already running in another runtime') from None
+            yield
+        finally:
+            fcntl.flock(fd,fcntl.LOCK_UN)
+            os.close(fd)
 
     def list(self):
         return [p.stem for p in sorted(self.directory.glob('*.json'))

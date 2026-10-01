@@ -10,11 +10,12 @@ from tool_result import ToolResult
 
 
 class ToolScheduler:
-    def __init__(self, registry, registered, executor, context, emit, workers=4):
+    def __init__(self, registry, registered, executor, context, emit, workers=4, checkpoint=None):
         if type(workers) is not int or not 1 <= workers <= 8:
             raise ValueError('tool_workers must be between 1 and 8')
         self.registry, self.registered, self.executor = registry, registered, executor
         self.context, self.emit, self.workers = context, emit, workers
+        self.checkpoint = checkpoint or (lambda *a: None)
         self.stopped = False
         self.cache = {}
         self.elapsed = 0.0
@@ -40,8 +41,11 @@ class ToolScheduler:
             return ToolResult.error('run_stopped', 'Run stopped; tool was not executed')
         try:
             with self.context.bind():
-                return execute_with_recovery(self.registry.get(name), lambda: self.executor(name, args),
+                self.checkpoint('executing',call,args,None)
+                result = execute_with_recovery(self.registry.get(name), lambda: self.executor(name, args),
                                              self.context, self.emit)
+                self.checkpoint('completed',call,args,result)
+                return result
         except (ExecutionCancelled, KeyboardInterrupt):
             return ToolResult(status='cancelled', error_code='interrupted')
         except DeadlineExceeded:

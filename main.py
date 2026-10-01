@@ -310,6 +310,9 @@ def chat(
                     runtime.new()
                 elif prompt == '/undo':
                     typer.echo(runtime.tools.undo_last())
+                elif prompt == '/acknowledge-interrupted':
+                    runtime.acknowledge_interrupted()
+                    typer.echo('Interrupted operations acknowledged; completed calls will not be replayed.')
                 elif prompt == '/model':
                     handle_model_command()
                     runtime.model = get_llm()
