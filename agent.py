@@ -56,6 +56,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     context_manager = context_manager or ContextManager(window=32768)
     started, generated, failures, steps = time.monotonic(), 0, {}, 0
 
+    observations = {}
     metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0}
 
     def finish(status, text, reason=''):
@@ -123,6 +124,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
         # Validate the envelope before appending it so transcripts remain resumable.
         ids = set()
+        prior_ids = {m['tool_call_id'] for m in messages if m.get('role') == 'tool'}
         for call in calls:
             if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
                 return finish('blocked', 'Model returned invalid tool calls.', 'invalid_protocol')
@@ -131,10 +133,13 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 return finish('blocked', 'Model returned an invalid tool call ID.', 'invalid_protocol')
             if key in ids:
                 return finish('blocked', 'Model returned duplicate tool call IDs.', 'invalid_protocol')
+            if key in prior_ids:
+                key = f'{key}_{step}_{len(ids)}'
             call['id'] = key
             ids.add(key)
         messages.append(message)
         halt = None
+        read_cache = {}
         for call in calls:
             name = call['function'].get('name')
             raw = call['function'].get('arguments')
@@ -151,7 +156,17 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 validate(args, registered[name])
                 phase = time.monotonic()
                 metrics['tool_calls'] += 1
-                output = mcp_client.call_tool(name, args) or '(empty result)'
+                cache_key = json.dumps([name, args], sort_keys=True)
+                read_names = {'read_file', 'search_code', 'list_directory', 'batch_read', 'batch_search'}
+                if name in read_names and cache_key in read_cache:
+                    output = read_cache[cache_key]
+                    emit({'type': 'tool_reused', 'name': name, 'call_id': call['id']})
+                else:
+                    output = mcp_client.call_tool(name, args) or '(empty result)'
+                    if name in read_names and not str(output).startswith('Error:'):
+                        read_cache[cache_key] = output
+                    if name not in read_names:
+                        read_cache.clear()
                 metrics['tool_seconds'] += time.monotonic() - phase
                 output = str(output)
             except (ValueError, TypeError, ValidationError) as exc:
@@ -161,6 +176,16 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
                 output = 'Error: tool interrupted'
             except Exception as exc:
                 output = f'Error: tool failed: {exc}'
+            # Retain one full identical observation in the active transcript.
+            # Fresh execution across steps observes external edits before deduplication.
+            original_output = output
+            if name in ('read_file', 'list_directory', 'batch_read') and not output.startswith('Error:'):
+                observation_key = json.dumps([name, args], sort_keys=True)
+                previous = observations.get(observation_key)
+                if previous and previous[1] == output and any(m.get('tool_call_id') == previous[0] for m in messages):
+                    output = f"Unchanged observation; see tool result {previous[0]}."
+                else:
+                    observations[observation_key] = (call['id'], original_output)
             output = context_manager.bound_output(output)
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': output})
             emit({'type': 'tool_finished', 'name': name, 'call_id': call['id'], 'output': output})

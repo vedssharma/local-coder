@@ -366,3 +366,18 @@ def test_cancelled_and_truncated_calls_do_not_execute(mock_llm, mock_mcp_client)
     mock_llm.create_chat_completion.return_value = response
     assert agent.run_agent(mock_llm, [], mcp_client=mock_mcp_client).status == 'budget_exhausted'
     mock_mcp_client.call_tool.assert_not_called()
+
+
+def test_duplicate_reads_execute_once_per_batch_and_keep_protocol(mock_llm, mock_mcp_client):
+    response = _make_tool_call_response('read_file', {'path': 'a'})
+    second = json.loads(json.dumps(response['choices'][0]['message']['tool_calls'][0]))
+    second['id'] = 'second'
+    response['choices'][0]['message']['tool_calls'].append(second)
+    mock_mcp_client.call_tool.return_value = 'observed contents'
+    mock_llm.create_chat_completion.side_effect = [response, _make_text_response('done')]
+    messages = []
+    result = agent.run_agent(mock_llm, messages, mcp_client=mock_mcp_client)
+    assert result.status == 'completed'
+    mock_mcp_client.call_tool.assert_called_once()
+    outputs = [m for m in messages if m['role'] == 'tool']
+    assert len(outputs) == 2 and 'Unchanged observation' in outputs[1]['content']
