@@ -222,6 +222,9 @@ def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, cons
             console.print(f"Tool: {event['name']}", markup=False)
         elif event['type'] == 'assistant_text' and not streamed:
             console.print(Markdown(event['text']))
+        elif event['type'] == 'verification_result':
+            if event['changed_files'] or event['checks'] or event['outstanding_processes'] or event['verification_status']=='requires_review':
+                console.print('Verification: '+event['verification_status'],markup=False)
         elif event['type'] == 'run_finished':
             console.print()
             if event['status'] != 'completed':

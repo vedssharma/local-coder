@@ -36,6 +36,11 @@ class RunResult:
     generated_tokens: int = 0
     reason: str = ''
     performance: dict = field(default_factory=dict)
+    changed_files: list[str] = field(default_factory=list)
+    checks: list[dict] = field(default_factory=list)
+    outstanding_processes: list[dict] = field(default_factory=list)
+    verification_status: str = 'not_run'
+    verification_scope: str = 'observed_commands_and_changes'
 
 
 def _build_tool_schemas(mcp_client=None):

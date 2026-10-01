@@ -262,3 +262,11 @@ Long turns can compact older completed tool exchanges without splitting call/res
 Session snapshots now contain a durable call journal. The runtime saves the assistant batch before dispatch, validated arguments and side-effect metadata before executing each operation, and its outcome immediately afterward. Atomic snapshots are fsynced, and an exclusive session lease prevents two runtimes from concurrently continuing the same session. Version-one transcripts remain loadable.
 
 Resume reconstructs missing tool results from completed journal entries and never automatically replays prior commands or edits. Pending calls receive `not_executed`; calls interrupted during execution or old live process handles receive `interrupted_operation`. Interrupted edits require a fresh read of the affected file before further mutations. Unknown command effects require explicit acknowledgement after inspection (`Runtime.acknowledge_interrupted()` or `/acknowledge-interrupted` in CLI chat). Acknowledgement does not mark an operation successful or grant additional tool permissions.
+
+### Evidence-aware completion
+
+`RunResult` and `turn_result`/`verification_result` events report changed files, observed check commands and exit codes, outstanding jobs, and a separate `verification_status`: `not_run`, `passed`, `failed`, `stale`, `in_progress`, or `requires_review`. Standard test argv commands are recognized; use `verification=true` for other genuine checks, including Bash commands. Preserve the check's exit status rather than masking it with a later successful shell command.
+
+The latest rerun of the same command replaces its earlier result; independent failed checks remain failures. Applying a patch invalidates checks recorded before that edit. Merely observing `git_diff` does not invalidate them. Final model prose is labeled as a model summary when evidence contradicts completion; the runtime returns `blocked` for failed/stale checks, outstanding jobs, and interrupted effects requiring inspection. Edits with no checks are explicitly reported as unverified.
+
+Verification covers observed commands and changes, not test coverage or task correctness. Arbitrary shell/MCP mutations are not fully tracked, and an exit-zero command does not establish that a meaningful check ran. Real-model evaluations and appropriate project tests remain necessary.

@@ -14,6 +14,7 @@ class ToolResult:
     duration_seconds: float = 0.0
     artifacts: list[str] = field(default_factory=list)
     attempts: int = 1
+    changed_files: list[str] = field(default_factory=list)
 
     @property
     def is_error(self):

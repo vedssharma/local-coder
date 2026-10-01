@@ -13,6 +13,7 @@ from workspace_tools import WorkspaceTools
 from process_orchestration import ProcessOrchestrator, validate_wait_seconds
 from checkpoint_recovery import recover_checkpoint
 from tool_result import ToolResult
+from verification import VerificationLedger
 
 
 class Runtime:
@@ -101,6 +102,8 @@ class Runtime:
                 if stage=='executing':
                     record['state']='executing'
                 else:
+                    if stage=='completed':
+                        VerificationLedger(self.checkpoint.setdefault('evidence',{})).observe(call['id'],record['name'],arguments,result)
                     record.update(state='completed',model_output=result.to_model(self.context),result=json.loads(result.to_model(self.context)))
                     if result.error_code in ('io_error','execution_error') and record['side_effects'] in ('filesystem','process','unknown'):
                         record.update(state='interrupted',inspection_required=True)
@@ -148,6 +151,19 @@ class Runtime:
                                tool_schemas=self.tools.selected_schemas(self.task_kind),
                                tool_executor=execute, execution_context=orchestrator.context, tool_workers=self.tool_workers,
                                checkpoint=self.checkpoint_call, reserved_call_ids=set(self.checkpoint.get('calls',{})))
+            if result.status in ('cancelled','budget_exhausted'):
+                self.tools.cancel_all_processes()
+            evidence=VerificationLedger(self.checkpoint.setdefault('evidence',{})).summarize(self.tools,self.interrupted_operations)
+            for field,value in evidence.items():
+                setattr(result,field,value)
+            if result.verification_status in ('failed','in_progress','stale','requires_review') and result.status=='completed':
+                result.status='blocked'
+                result.reason='verification_'+result.verification_status
+                result.text='Verification '+result.verification_status+': the observed evidence does not establish successful completion.\n\nModel summary (not verification evidence):\n'+result.text
+                self.messages.append({'role':'user','name':'verification_evidence','content':json.dumps(evidence)})
+            elif result.changed_files and result.verification_status=='not_run':
+                result.text='Changes are not verified: no validation command was observed.\n\nModel summary (not verification evidence):\n'+result.text
+            self.emit({'type':'verification_result',**evidence})
             self.emit({'type': 'turn_result', **asdict(result)})
             return result
         finally:

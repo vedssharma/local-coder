@@ -121,7 +121,8 @@ class WorkspaceTools:
         self.registry.register(ToolSpec(
             schema('run_command', 'Run an argv command in the workspace. Poll returned process_id until it exits.',
            {'argv': {'type': 'array', 'items': STRING, 'minItems': 1}, 'cwd': STRING,
-            'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 300}}, ['argv']), self._tool_run_command,
+            'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 300},
+            'verification': {'type':'boolean'}}, ['argv']), self._tool_run_command,
             minimum_mode='execute', side_effects='process', concurrency='serial',
             cacheable=False, compact_observation=False, task_kinds=('code', 'all'),
             default_timeout=60, max_timeout=300, wait_for_process=True))
@@ -130,7 +131,8 @@ class WorkspaceTools:
             schema('bash', 'Run a non-interactive Bash command, including pipes and redirects, in the workspace. '
            'Poll returned process_id until it exits. No persistent shell or interactive stdin.',
            {'command': {'type': 'string', 'minLength': 1}, 'cwd': STRING,
-            'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 300}}, ['command']), self._tool_bash,
+            'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 300},
+            'verification': {'type':'boolean'}}, ['command']), self._tool_bash,
             minimum_mode='execute', side_effects='process', concurrency='serial',
             cacheable=False, compact_observation=False, task_kinds=('code', 'all'),
             default_timeout=60, max_timeout=300, wait_for_process=True))
@@ -317,7 +319,7 @@ class WorkspaceTools:
             finally:
                 temp.unlink(missing_ok=True)
         self._record_patch(p, before, updated, mode)
-        return f'Patched {p.relative_to(self.root)}'
+        return ToolResult(data=f'Patched {p.relative_to(self.root)}',changed_files=[str(p.relative_to(self.root))])
 
     def _tool_run_command(self, args):
         args = {'timeout_seconds': self.registry.get('run_command').default_timeout, **args}
@@ -353,7 +355,12 @@ class WorkspaceTools:
         result = self._capture(['git', '--no-pager', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--'])
         untracked = self._capture(['git', '-c', 'core.fsmonitor=false', 'ls-files', '--others', '--exclude-standard', '--exclude=.local-coder/', '-z'])
         result['untracked_files'] = [p for p in untracked['output'].split('\0') if p]
-        return ToolResult.process(result)
+        names=self._capture(['git','-c','core.fsmonitor=false','diff','--name-only','-z','HEAD','--'])
+        outcome=ToolResult.process(result)
+        if result['exit_code']==0 and names['exit_code']==0:
+            outcome.changed_files=sorted(set(names['output'].split('\0'))|set(result['untracked_files']))
+            outcome.changed_files=[p for p in outcome.changed_files if p]
+        return outcome
 
     def _record_patch(self, path, before, after, mode):
         directory = self.path('.local-coder/undo')

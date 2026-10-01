@@ -40,7 +40,9 @@ def test_wait_limit_returns_live_process_handle(tmp_path, wait_seconds):
     model = MagicMock()
     model.create_chat_completion.side_effect = [response('bash', {'command': 'sleep 30'}), answer()]
     with Runtime(model, tmp_path, tmp_path / 'state', mode='execute', process_wait_seconds=wait_seconds) as runtime:
-        assert runtime.turn('start command').status == 'completed'
+        outcome = runtime.turn('start command')
+        assert outcome.status == 'blocked' and outcome.reason == 'verification_in_progress'
+        assert outcome.outstanding_processes
         result = json.loads(next(m['content'] for m in runtime.messages if m['role'] == 'tool'))
         assert result['status'] == 'running' and result['data']['running']
         state = runtime.tools.processes[result['data']['process_id']]

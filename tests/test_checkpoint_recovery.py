@@ -56,7 +56,10 @@ runtime.turn('append once')
             assert observation['error_code']=='interrupted_operation' and runtime.interrupted_operations
             blocked=runtime.tools.registry.get('bash')
             model.create_chat_completion.side_effect=[call_response('bash',{'command':'printf x >> counter'}),answer()]
-        assert runtime.turn('continue without replaying').status=='completed'
+        outcome=runtime.turn('continue without replaying')
+        assert outcome.status==('completed' if persist_completed else 'blocked')
+        if not persist_completed:
+            assert outcome.verification_status=='requires_review'
         assert (tmp_path/'counter').read_text()=='x'
         if not persist_completed:
             assert any('inspection_required' in m.get('content','') for m in runtime.messages if m['role']=='tool')
