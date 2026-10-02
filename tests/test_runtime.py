@@ -26,9 +26,19 @@ def test_minimal_tools_and_unchanged_file_context(tmp_path):
         runtime.turn('explain again', {'a.py': 'unique file content'})
         assert sum('unique file content' in m.get('content', '') for m in runtime.messages) == 1
         names = {s['function']['name'] for s in model.create_chat_completion.call_args.kwargs['tools']}
-        assert names == {'read', 'web_search', 'web_fetch'}
+        assert names == {'read', 'list', 'search', 'web_search', 'web_fetch'}
         runtime.turn('changed', {'a.py': 'updated file content'})
         assert 'updated file content' in runtime.messages[-2]['content']
     with Runtime(model, tmp_path, tmp_path / 'state', task_kind='answer') as runtime:
         runtime.turn('hello')
         assert 'tools' not in model.create_chat_completion.call_args.kwargs
+
+
+def test_default_max_tokens_follow_the_context_window(tmp_path):
+    model = MagicMock()
+    model.create_chat_completion.return_value = {'choices': [{'message': {'content': 'done'}, 'finish_reason': 'stop'}]}
+    with Runtime(model, tmp_path, tmp_path / 'state', context_window=16384) as runtime:
+        runtime.turn('explain')
+        assert model.create_chat_completion.call_args.kwargs['max_tokens'] == 4096
+        runtime.turn('explain', max_tokens=700)
+        assert model.create_chat_completion.call_args.kwargs['max_tokens'] == 700

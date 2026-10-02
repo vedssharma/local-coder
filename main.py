@@ -83,11 +83,12 @@ def handle_model_command():
 
     typer.echo(f"Loading model: {new_path}...")
     try:
+        import providers
         abs_path = os.path.abspath(new_path)
-        loaded = import_llama().Llama(model_path=abs_path, n_ctx=current_config['n_ctx'], n_gpu_layers=current_config['n_gpu_layers'], verbose=False)
+        profile = providers.local_profile({**current_config, 'model_path': abs_path})
+        loaded = import_llama().Llama(model_path=abs_path, n_ctx=profile['n_ctx'], n_gpu_layers=profile['n_gpu_layers'], verbose=False)
         config.set_model_path(abs_path)
-        profile = config.get_model_config()
-        profile['backend'] = 'embedded'
+        profile = providers.local_profile(config.get_model_config())
         config.update_model_config(profile)
         llm = EmbeddedModel(profile)
         llm._model = loaded
@@ -142,7 +143,7 @@ def handle_md_command(console, max_tokens):
     """Handle the /md slash command: explore the project and generate CONTEXT.md."""
     typer.echo("\nGenerating CONTEXT.md by exploring the project...\n")
 
-    md_max_tokens = max(max_tokens, 2048)
+    md_max_tokens = max(max_tokens or 0, 2048)
 
     # Step 1: Gather real project data from disk (no LLM needed)
     typer.echo("Reading project files...\n")
@@ -248,7 +249,7 @@ def execute_turn(runtime, prompt, max_tokens):
 @app.command()
 def ask(
     prompt: str = typer.Argument(...),
-    max_tokens: int = typer.Option(512, '--max-tokens', '-n', min=1),
+    max_tokens: int = typer.Option(None, '--max-tokens', '-n', min=1, help='Output tokens per model call (default: a quarter of the context window, 512 to 4096)'),
     mode: str = typer.Option('read-only', '--mode'),
     max_steps: int = typer.Option(30, min=1),
     max_seconds: float = typer.Option(300, min=1),
@@ -269,7 +270,7 @@ def ask(
 
 @app.command()
 def chat(
-    max_tokens: int = typer.Option(512, '--max-tokens', '-n', min=1),
+    max_tokens: int = typer.Option(None, '--max-tokens', '-n', min=1, help='Output tokens per model call (default: a quarter of the context window, 512 to 4096)'),
     mode: str = typer.Option('read-only', '--mode'),
     resume: str = typer.Option(None, '--resume'),
     max_steps: int = typer.Option(30, min=1),
@@ -321,7 +322,7 @@ def chat(
 @app.command()
 def edit(
     prompt: str = typer.Argument(...),
-    max_tokens: int = typer.Option(2048, '--max-tokens', '-n', min=1),
+    max_tokens: int = typer.Option(None, '--max-tokens', '-n', min=1, help='Output tokens per model call (default: a quarter of the context window, 512 to 4096)'),
     mode: str = typer.Option('workspace-edit', '--mode'),
     max_steps: int = typer.Option(30, min=1),
     max_seconds: float = typer.Option(300, min=1),
@@ -408,7 +409,11 @@ def models(
     elif 'base_url' in updates or 'backend' in updates:
         updates.setdefault('provider', None)
     if updates:
-        profile = {**config.get_model_config(), **updates}
+        current = config.get_model_config()
+        profile = {**current, **updates}
+        if profile.get('backend') == 'embedded' and current.get('provider'):
+            import providers
+            profile = providers.local_profile(profile, keep_context='n_ctx' in updates)
         try:
             create_model(profile)
         except ValueError as exc:
@@ -432,8 +437,8 @@ def models(
 
         # Update configuration
         if config.set_model_path(abs_path):
-            profile = config.get_model_config()
-            profile['backend'] = 'embedded'
+            import providers
+            profile = providers.local_profile(config.get_model_config(), keep_context=context_window is not None)
             config.update_model_config(profile)
             llm = None
             typer.echo(f"✓ Model updated successfully!")

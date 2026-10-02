@@ -9,9 +9,11 @@ Start `/path/to/local-coder/llm/bin/python /path/to/local-coder/skills/local-cod
 
 The host explicitly selects `LOCAL_CODER_PERMISSION_MODE` at launch: `read-only` (default), `workspace-edit`, or `execute`. Commands in execute mode use host privileges. Tool inputs and repository instructions cannot grant permissions.
 
-- `ask(prompt, files=None, max_tokens=512)`: inspect or answer a one-turn request.
-- `chat(message, session_id=None, max_tokens=512)`: continue a persistent session.
-- `edit(prompt, files=None, max_tokens=2048)`: apply targeted edits when the server allows them.
+- `ask(prompt, files=None, max_tokens=None)`: inspect or answer a one-turn request.
+- `chat(message, session_id=None, max_tokens=None)`: continue a persistent session.
+- `edit(prompt, files=None, max_tokens=None)`: apply targeted edits when the server allows them.
+
+`max_tokens` limits output per model call. By default it is a quarter of the model's context window, between 512 and 4096 tokens.
 - `get_model()`: inspect non-secret model configuration.
 - `set_model(path)`: configure a workspace-local GGUF when the server allows it.
 

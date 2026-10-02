@@ -15,6 +15,14 @@ from tool_recovery import ProgressTracker
 from tool_scheduler import ToolScheduler
 
 MAX_AGENT_ITERATIONS = 10
+TRUNCATED_CALL_RECOVERY = ('Your previous response hit the {limit}-token output limit before its tool call was complete, '
+                           'so nothing was executed. Make the change in smaller steps: use edit for targeted '
+                           'replacements, or write a short file and extend it with further edit calls.')
+
+
+def default_output_tokens(context_window):
+    """Per-call output limit: room for whole-file writes without starving a small context of prompt space."""
+    return max(512, min(4096, context_window // 4))
 
 
 @dataclass
@@ -75,6 +83,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             registry.register(ToolSpec(definition, handler=None))
     context_manager = context_manager or ContextManager(window=32768)
     started, generated, failures, steps = time.monotonic(), 0, {}, 0
+    truncated_calls = 0
 
     execution_context = execution_context or ExecutionContext(started + budget.max_seconds, cancel_event or threading.Event())
     if isinstance(llm, ModelAdapter):
@@ -132,7 +141,15 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         if result := stopped(check_tokens=False):
             return result
         if choice.get('finish_reason') == 'length':
+            # A cut-off tool call is never executed. Ask once for smaller steps instead of ending the run.
+            if message.get('tool_calls') and not truncated_calls:
+                truncated_calls += 1
+                messages.append({'role': 'user', 'name': 'agent_recovery',
+                                 'content': TRUNCATED_CALL_RECOVERY.format(limit=kwargs['max_tokens'])})
+                emit({'type': 'output_truncated', 'step': steps, 'recovering': True})
+                continue
             return finish('budget_exhausted', message.get('content') or 'Model output was truncated.', 'output_truncated')
+        truncated_calls = 0
         if choice.get('finish_reason') in ('content_filter', 'error'):
             return finish('blocked', 'Model could not complete this request.', 'model_rejected')
         calls = message.get('tool_calls') or []
