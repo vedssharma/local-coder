@@ -1,6 +1,7 @@
 """Model adapters for embedded llama.cpp and local OpenAI-compatible servers."""
 import json
 import os
+import urllib.error
 import urllib.request
 import threading
 import time
@@ -9,6 +10,10 @@ from contextlib import nullcontext
 
 
 TUNING_INTS = ('n_threads', 'n_threads_batch', 'n_batch', 'n_ubatch')
+# Rate limits, overload (529 is Anthropic's), and gateway failures; 4xx request errors are final.
+RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504, 529})
+MAX_MODEL_RETRIES = 2
+MAX_RETRY_AFTER_SECONDS = 60
 KV_TYPES = ('f16', 'q8_0', 'q4_0')
 
 
@@ -232,6 +237,24 @@ class OpenAIModel(ModelAdapter):
         self.url = base + '/chat/completions'
 
     def _complete(self, **kwargs):
+        for attempt in range(MAX_MODEL_RETRIES + 1):
+            try:
+                return self._request(**kwargs)
+            except Exception as exc:
+                # Never retry once output streamed: the caller has already seen it.
+                delay = retry_delay(exc, attempt)
+                if delay is None or attempt == MAX_MODEL_RETRIES or self._first_output is not None:
+                    raise
+                context = self.execution_context
+                if context and context.deadline - time.monotonic() <= delay:
+                    raise
+                self.emit({'type': 'model_retry', 'attempt': attempt + 2, 'delay_seconds': delay, 'error': str(exc)})
+                if context:
+                    context.wait(delay)
+                else:
+                    time.sleep(delay)
+
+    def _request(self, **kwargs):
         kwargs['model'] = self.profile.get('model', 'local-model')
         if self.profile.get('server_cache_prompt'):
             kwargs['cache_prompt'] = True
@@ -258,6 +281,26 @@ class OpenAIModel(ModelAdapter):
                         return
                     yield json.loads(data)
             return self.collect(chunks())
+
+
+def retry_delay(exc, attempt):
+    """Seconds to wait before retrying a failed model request, or None when it is not transient."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code not in RETRYABLE_STATUSES:
+            return None
+        try:
+            after = float(exc.headers.get('Retry-After', ''))
+        except (TypeError, ValueError, AttributeError):
+            after = None
+        if after is not None and after >= 0:
+            return min(after, MAX_RETRY_AFTER_SECONDS)
+        return float(2 ** attempt)
+    if isinstance(exc, urllib.error.URLError):
+        exc = exc.reason
+    # A dropped connection before any response (RemoteDisconnected is a ConnectionResetError).
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return float(2 ** attempt)
+    return None
 
 
 def create_model(profile):

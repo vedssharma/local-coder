@@ -214,6 +214,8 @@ def make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, tas
             console.print(event['text'], end='', markup=False, highlight=False)
         elif event['type'] == 'tool_started':
             console.print(f"Tool: {event['name']}", markup=False)
+        elif event['type'] == 'model_retry':
+            console.print(f"Model request failed ({event['error']}); retrying in {event['delay_seconds']:g}s", markup=False)
         elif event['type'] == 'assistant_text' and not streamed:
             console.print(Markdown(event['text']))
         elif event['type'] == 'verification_result':
