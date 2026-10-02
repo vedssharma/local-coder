@@ -207,7 +207,7 @@ def handle_md_command(console, max_tokens):
         typer.echo("Write cancelled.\n")
 
 
-def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind="auto", persistent=False, profile_name=None, route=False, process_wait_seconds=2, tool_workers=4):
+def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind="auto", persistent=False, profile_name=None, route=False, process_wait_seconds=2, tool_workers=4, subagents=4):
     if mode not in MODES:
         raise typer.BadParameter('mode must be read-only, workspace-edit, or execute')
     streamed = False
@@ -220,6 +220,12 @@ def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, cons
             console.print(event['text'], end='', markup=False, highlight=False)
         elif event['type'] == 'tool_started':
             console.print(f"Tool: {event['name']}", markup=False)
+        elif event['type'] == 'subagent_started':
+            console.print(f"Subagent {event['name']} started ({event['mode']})", markup=False)
+        elif event['type'] == 'subagent_tool':
+            console.print(f"  [{event['subagent']}] tool: {event['name']}", markup=False)
+        elif event['type'] == 'subagent_finished':
+            console.print(f"Subagent {event['name']} {event['status']} ({event['steps']} steps)", markup=False)
         elif event['type'] == 'assistant_text' and not streamed:
             console.print(Markdown(event['text']))
         elif event['type'] == 'verification_result':
@@ -240,7 +246,7 @@ def make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, cons
         mcp_client=None if no_mcp else get_mcp_client(), emit=emit,
         budget=RunBudget(max_steps, max_seconds, token_budget),
         context_window=selected['n_ctx'], trace=trace, task_kind=task_kind,
-        process_wait_seconds=process_wait_seconds, tool_workers=tool_workers)
+        process_wait_seconds=process_wait_seconds, tool_workers=tool_workers, subagents=subagents)
 
 
 def execute_turn(runtime, prompt, max_tokens):
@@ -269,9 +275,10 @@ def ask(
     process_wait_seconds: float = typer.Option(2, '--process-wait-seconds', min=0, max=30,
         help='Wait for command results without model polling; 0 returns handles immediately'),
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
+    subagents: int = typer.Option(4, '--subagents', min=0, max=8, help='Maximum parallel subagents per spawn; 0 disables'),
 ):
     """Ask a question or run a bounded coding task."""
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, process_wait_seconds, tool_workers) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, process_wait_seconds, tool_workers, subagents) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
@@ -294,10 +301,11 @@ def chat(
     process_wait_seconds: float = typer.Option(2, '--process-wait-seconds', min=0, max=30,
         help='Wait for command results without model polling; 0 returns handles immediately'),
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
+    subagents: int = typer.Option(4, '--subagents', min=0, max=8, help='Maximum parallel subagents per spawn; 0 disables'),
 ):
     """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /exit."""
     console = Console()
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent, profile_name, route, process_wait_seconds, tool_workers) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent, profile_name, route, process_wait_seconds, tool_workers, subagents) as runtime:
         if resume:
             runtime.resume(resume)
         while True:
@@ -348,9 +356,10 @@ def edit(
     process_wait_seconds: float = typer.Option(2, '--process-wait-seconds', min=0, max=30,
         help='Wait for command results without model polling; 0 returns handles immediately'),
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
+    subagents: int = typer.Option(4, '--subagents', min=0, max=8, help='Maximum parallel subagents per spawn; 0 disables'),
 ):
     """Apply targeted edits; --mode execute also permits validation commands."""
-    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, process_wait_seconds, tool_workers) as runtime:
+    with make_runtime(mode, no_mcp, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, process_wait_seconds, tool_workers, subagents) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)

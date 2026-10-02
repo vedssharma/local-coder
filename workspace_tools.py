@@ -44,6 +44,7 @@ class WorkspaceTools:
         self.mode = mode
         self.mcp_client = mcp_client
         self.processes = {}
+        self._write_lock = threading.RLock()
         self.is_connected = True
         self.registry = ToolRegistry()
         self._register_tools()
@@ -293,6 +294,10 @@ class WorkspaceTools:
         return ToolResult.process(result)
 
     def _tool_apply_patch(self, args):
+        with self._write_lock:
+            return self._apply_patch(args)
+
+    def _apply_patch(self, args):
         p = self.path(args['path'])
         old, new = args['old_text'], args['new_text']
         before = p.read_text() if p.exists() else None

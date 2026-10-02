@@ -14,12 +14,13 @@ from process_orchestration import ProcessOrchestrator, validate_wait_seconds
 from checkpoint_recovery import recover_checkpoint
 from tool_result import ToolResult
 from verification import VerificationLedger
+from subagents import SubagentManager, in_subagent
 
 
 class Runtime:
     def __init__(self, model, workspace, state_dir, mode='read-only', mcp_client=None,
                  emit=None, budget=None, context_window=8192, trace=False, task_kind="auto",
-                 process_wait_seconds=2, tool_workers=4):
+                 process_wait_seconds=2, tool_workers=4, subagents=0):
         if type(tool_workers) is not int or not 1 <= tool_workers <= 8:
             raise ValueError('tool_workers must be between 1 and 8')
         self.tool_workers = tool_workers
@@ -40,8 +41,13 @@ class Runtime:
         self.sink = emit or (lambda event: None)
         self.trace = trace
         self.task_kind = task_kind
+        self.tool_executor = None
+        self.max_tokens = 512
+        self.subagents = SubagentManager(self, subagents)
 
     def emit(self, event):
+        if in_subagent() and event['type'] in ('assistant_delta', 'inference_metrics'):
+            return
         with self._emit_lock:
             self.sink(event)
             if self.trace:
@@ -109,9 +115,15 @@ class Runtime:
                         record.update(state='interrupted',inspection_required=True)
             self.store.save(self.messages,self.session_id,self.checkpoint)
 
+    def record_subagent_evidence(self, call_id, name, arguments, result):
+        with self._checkpoint_lock:
+            VerificationLedger(self.checkpoint.setdefault('evidence', {})).observe(call_id, name, arguments, result)
+
     def _turn(self, prompt, file_contents=None, max_tokens=512):
         if not isinstance(max_tokens, int) or max_tokens <= 0:
             raise ValueError('max_tokens must be positive')
+        self.max_tokens = max_tokens
+        self.subagents.reset()
         self.cancel_event.clear()
         history = [m for m in self.messages if m.get('role') != 'system' or m.get('name') == 'working_memory']
         file_contents = file_contents or {}
@@ -144,6 +156,7 @@ class Runtime:
                         if original and self.tools.path(original)==self.tools.path(args['path']):
                             record['inspection_required']=False
             return outcome
+        self.tool_executor = execute
         try:
             result = run_agent(self.model, self.messages, max_tokens, self.tools,
                                budget=self.budget, cancel_event=self.cancel_event,
@@ -167,6 +180,7 @@ class Runtime:
             self.emit({'type': 'turn_result', **asdict(result)})
             return result
         finally:
+            self.tool_executor = None
             if isinstance(self.model, ModelAdapter):
                 self.model.execution_context = None
             if self.cancel_event.is_set() or (result and result.status in ('cancelled', 'budget_exhausted')):

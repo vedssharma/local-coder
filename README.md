@@ -88,6 +88,21 @@ File tools and `@file` references reject paths outside the selected workspace, i
 
 Runs report `completed`, `blocked`, `cancelled`, or `budget_exhausted`. `completed` means the model ended its response; verification requires observing the actual check results. Exhaustion never forces an extra answer that claims completion. Cancellation and time limits are checked between operations; streaming adapters also check cancellation between chunks. A blocking embedded generation step cannot be forcibly interrupted by the engine.
 
+## Parallel subagents
+
+For large work the model can call `spawn_subagents` with 1–4 independent `tasks` (`prompt`, optional `name`, optional `mode`). Each subagent runs its own bounded tool loop with a fresh context in a parallel thread, then returns a final report; the coordinating model reviews and verifies the combined result.
+
+```bash
+python main.py edit "Add type hints to each module in src/" --mode workspace-edit --subagents 4
+python main.py ask "Investigate auth, billing, and search separately" --subagents 3   # disable with --subagents 0
+```
+
+- Subagents cannot see the coordinator's conversation, so each prompt must be self-contained. They cannot spawn further subagents; at most 16 run per turn, each limited to 10 steps.
+- A subagent's `mode` can only narrow the session's permission mode (`read-only` helpers inside an `execute` session are fine); requesting more is refused.
+- They share the session's deadline, cancellation, workspace, process table, and verification evidence. Files they change and checks they run count toward the final `changed_files`/`verification_status`, and cancelling the run stops them. Concurrent `apply_patch` calls are serialized, but give write-capable subagents disjoint files.
+- Embedded llama.cpp serializes generation, so parallelism mainly speeds up tool work; OpenAI-compatible servers can generate for several subagents at once. Each extra schema costs context; use `--subagents 0` on very small windows.
+- Subagent transcripts are not stored in the session; `--trace` records `subagent_started`, `subagent_tool`, and `subagent_finished` events. The MCP server reads `LOCAL_CODER_SUBAGENTS` (default 4).
+
 ## Sessions and context
 
 Each CLI turn saves a session and prints its ID. Sessions include tool calls and observations, not only final answers. Resuming never restores a previous permission mode; select permissions explicitly for the new process.
@@ -145,6 +160,7 @@ Reports record success checks, changed files, observed command exit codes, tool 
 - `workspace_tools.py`: scoped tools, processes, permissions, and patch undo.
 - `session.py`: persistent transcripts, context budgeting, scoped instructions.
 - `runtime.py`: shared turn/session lifecycle and events.
+- `subagents.py`: the `spawn_subagents` tool and parallel subagent runs.
 - `model_backend.py`: embedded and OpenAI-compatible streaming adapters.
 - `main.py`: CLI and terminal rendering.
 - `skills/local-coder/scripts/server.py`: MCP interface to the same runtime.
