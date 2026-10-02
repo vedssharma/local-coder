@@ -108,3 +108,92 @@ def test_cache_configuration_and_stable_tool_prefix(monkeypatch):
     assert capture.request == first
     capture.create_chat_completion(messages=[{'role': 'user', 'content': 'changed'}], tools=tools)
     assert capture.request != first
+
+
+def _serve(statuses, retry_after=None):
+    """A server that fails with each status in turn, then succeeds without streaming."""
+    statuses = list(statuses)
+    requests = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+            status = statuses.pop(0) if statuses else 200
+            body = json.dumps({'choices': [{'message': {'role': 'assistant', 'content': 'ok'}, 'finish_reason': 'stop'}]}
+                              if status == 200 else {'error': 'busy'}).encode()
+            self.send_response(status)
+            if retry_after is not None and status != 200:
+                self.send_header('Retry-After', retry_after)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *_):
+            pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    model = OpenAIModel({'base_url': f'http://127.0.0.1:{server.server_port}/v1', 'stream': False})
+    return server, model, requests
+
+
+@pytest.mark.parametrize('status', [429, 503, 529])
+def test_transient_model_errors_are_retried_with_retry_after(status):
+    server, model, requests = _serve([status, status], retry_after='0')
+    events = []
+    model.emit = events.append
+    try:
+        result = model.create_chat_completion(messages=[], max_tokens=8)
+        assert result['choices'][0]['message']['content'] == 'ok'
+        assert len(requests) == 3
+        assert [e['attempt'] for e in events if e['type'] == 'model_retry'] == [2, 3]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_model_retries_are_bounded_and_skip_request_errors():
+    import urllib.error
+    server, model, requests = _serve([500, 500, 500, 500], retry_after='0')
+    try:
+        with pytest.raises(urllib.error.HTTPError, match='500'):
+            model.create_chat_completion(messages=[], max_tokens=8)
+        assert len(requests) == 3
+    finally:
+        server.shutdown()
+        server.server_close()
+    server, model, requests = _serve([400])
+    try:
+        with pytest.raises(urllib.error.HTTPError, match='400'):
+            model.create_chat_completion(messages=[], max_tokens=8)
+        assert len(requests) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_model_retry_never_waits_past_the_run_deadline():
+    import time, urllib.error
+    from execution_context import ExecutionContext
+    server, model, requests = _serve([429], retry_after='30')
+    model.execution_context = ExecutionContext(time.monotonic() + 5, threading.Event())
+    try:
+        started = time.monotonic()
+        with pytest.raises(urllib.error.HTTPError, match='429'):
+            model.create_chat_completion(messages=[], max_tokens=8)
+        assert len(requests) == 1 and time.monotonic() - started < 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_retry_delay_policy():
+    import urllib.error
+    from email.message import Message
+    from model_backend import retry_delay
+    headers = Message()
+    headers['Retry-After'] = '600'
+    assert retry_delay(urllib.error.HTTPError('u', 429, 'x', headers, None), 0) == 60
+    assert retry_delay(urllib.error.HTTPError('u', 503, 'x', Message(), None), 1) == 2
+    assert retry_delay(urllib.error.HTTPError('u', 401, 'x', Message(), None), 0) is None
+    assert retry_delay(urllib.error.URLError(ConnectionResetError()), 0) == 1
+    assert retry_delay(urllib.error.URLError(ConnectionRefusedError()), 0) is None
+    assert retry_delay(ValueError('bad json'), 0) is None
