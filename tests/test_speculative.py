@@ -41,7 +41,9 @@ def test_speculation_is_explicit_and_backend_checked():
         OpenAIModel({'backend': 'openai', 'speculative_mode': 'prompt-lookup'})
 
 
-def test_native_loader_supplies_prompt_lookup_callback(monkeypatch):
+def test_native_loader_supplies_prompt_lookup_callback(monkeypatch, tmp_path):
+    (tmp_path / 'target.gguf').touch()
+    monkeypatch.chdir(tmp_path)
     import sys
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -57,7 +59,9 @@ def test_native_loader_supplies_prompt_lookup_callback(monkeypatch):
     assert constructor.call_args.kwargs['draft_model'] is callback.return_value
 
 
-def test_incompatible_learned_draft_releases_both_models(monkeypatch):
+def test_incompatible_learned_draft_releases_both_models(monkeypatch, tmp_path):
+    (tmp_path / 'target.gguf').touch()
+    monkeypatch.chdir(tmp_path)
     import llama_cpp
     class Model(Fake):
         def __init__(self, mismatch=False):

@@ -15,6 +15,17 @@ RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504, 529})
 MAX_MODEL_RETRIES = 2
 MAX_RETRY_AFTER_SECONDS = 60
 KV_TYPES = ('f16', 'q8_0', 'q4_0')
+EMBEDDED_INSTALL_HINT = ('Embedded GGUF inference requires llama-cpp-python: pip install -r requirements-embedded.txt. '
+                         'Hosted providers and OpenAI-compatible servers do not need it.')
+
+
+def import_llama():
+    """Import llama-cpp-python on demand; only embedded inference needs the native build."""
+    try:
+        import llama_cpp
+    except ImportError as exc:
+        raise RuntimeError(EMBEDDED_INSTALL_HINT) from exc
+    return llama_cpp
 
 
 def validate_tuning(profile):
@@ -146,7 +157,9 @@ class EmbeddedModel(ModelAdapter):
 
     def load(self):
         if self._model is None:
-            from llama_cpp import Llama
+            if not os.path.exists(self.profile['model_path']):
+                raise ValueError(f"Model path does not exist: {self.profile['model_path']}")
+            Llama = import_llama().Llama
             kwargs = {key: self.profile[key] for key in ('model_path', 'n_ctx', 'n_gpu_layers')}
             if self.profile.get('chat_format'):
                 kwargs['chat_format'] = self.profile['chat_format']

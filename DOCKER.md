@@ -73,11 +73,10 @@ Edit the `Dockerfile` and uncomment the GPU installation lines:
 
 ```dockerfile
 # Uncomment this:
-RUN CMAKE_ARGS="-DGGML_CUDA=on" pip install --no-cache-dir llama-cpp-python --force-reinstall && \
-    pip install --no-cache-dir typer rich
+RUN CMAKE_ARGS="-DGGML_CUDA=on" pip install --no-cache-dir -r requirements-embedded.txt
 
 # Comment out the CPU version:
-# RUN pip install --no-cache-dir -r requirements.txt
+# RUN CMAKE_BUILD_PARALLEL_LEVEL=2 pip install --no-cache-dir -r requirements-embedded.txt
 ```
 
 **2. Build the image:**

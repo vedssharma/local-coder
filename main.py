@@ -3,13 +3,12 @@ from helpers import parse_file_references
 from agent import run_agent_loop
 from workspace_tools import WorkspaceTools, MODES
 from runtime import Runtime
-from model_backend import create_model, EmbeddedModel
+from model_backend import create_model, EmbeddedModel, import_llama
 from agent import RunBudget
 import config
 import os
 import glob
 import typer
-from llama_cpp import Llama
 from rich.console import Console
 from rich.markdown import Markdown
 
@@ -87,7 +86,7 @@ def handle_model_command():
         import providers
         abs_path = os.path.abspath(new_path)
         profile = providers.local_profile({**current_config, 'model_path': abs_path})
-        loaded = Llama(model_path=abs_path, n_ctx=profile['n_ctx'], n_gpu_layers=profile['n_gpu_layers'], verbose=False)
+        loaded = import_llama().Llama(model_path=abs_path, n_ctx=profile['n_ctx'], n_gpu_layers=profile['n_gpu_layers'], verbose=False)
         config.set_model_path(abs_path)
         profile = providers.local_profile(config.get_model_config())
         config.update_model_config(profile)

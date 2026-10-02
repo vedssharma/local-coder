@@ -14,15 +14,14 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file
-COPY requirements.txt .
+COPY requirements.txt requirements-embedded.txt ./
 
 # Install Python dependencies
 # For CPU-only version (default)
-RUN CMAKE_BUILD_PARALLEL_LEVEL=2 pip install --no-cache-dir -r requirements.txt
+RUN CMAKE_BUILD_PARALLEL_LEVEL=2 pip install --no-cache-dir -r requirements-embedded.txt
 
 # For GPU support, uncomment the following and comment the line above:
-# RUN CMAKE_ARGS="-DGGML_CUDA=on" pip install --no-cache-dir llama-cpp-python --force-reinstall && \
-#     pip install --no-cache-dir typer rich
+# RUN CMAKE_ARGS="-DGGML_CUDA=on" pip install --no-cache-dir -r requirements-embedded.txt
 
 # Copy application files
 COPY *.py ./

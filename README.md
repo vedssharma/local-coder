@@ -6,7 +6,7 @@ Embedded inference stays on your machine. The server backend sends prompts and f
 
 ## Install
 
-Python 3.10+, a C/C++ build toolchain for llama-cpp-python, are required. Node.js is not required.
+Python 3.10+ is required. Node.js is not required.
 
 ```bash
 python -m venv llm
@@ -16,11 +16,19 @@ pip install pytest pytest-asyncio
 python -m pytest -q
 ```
 
+That is enough for hosted providers and OpenAI-compatible servers. To run GGUF models in-process, also install llama-cpp-python, which needs a C/C++ build toolchain:
+
+```bash
+pip install -r requirements-embedded.txt
+```
+
 For a CPU build when compiler environment variables point to unavailable tools:
 
 ```bash
-CC=gcc CXX=g++ CMAKE_BUILD_PARALLEL_LEVEL=2 pip install -r requirements.txt
+CC=gcc CXX=g++ CMAKE_BUILD_PARALLEL_LEVEL=2 pip install -r requirements-embedded.txt
 ```
+
+The test suite stubs llama-cpp-python, so it runs without the native build.
 
 CUDA and Metal builds are optional; follow llama-cpp-python's installation instructions for your platform. Docker configuration is described in [DOCKER.md](DOCKER.md).
 

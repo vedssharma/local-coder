@@ -51,7 +51,9 @@ def test_openai_transport_streams_and_sends_model_and_tools():
         thread.join()
 
 
-def test_tuning_reaches_native_constructor_and_invalid_values_are_rejected(monkeypatch):
+def test_tuning_reaches_native_constructor_and_invalid_values_are_rejected(monkeypatch, tmp_path):
+    (tmp_path / 'm.gguf').touch()
+    monkeypatch.chdir(tmp_path)
     from unittest.mock import MagicMock
     import llama_cpp
     from model_backend import EmbeddedModel
@@ -84,7 +86,9 @@ def test_measurements_do_not_invent_token_rates():
     assert report['all_completed']
 
 
-def test_cache_configuration_and_stable_tool_prefix(monkeypatch):
+def test_cache_configuration_and_stable_tool_prefix(monkeypatch, tmp_path):
+    (tmp_path / 'm.gguf').touch()
+    monkeypatch.chdir(tmp_path)
     from unittest.mock import MagicMock
     import llama_cpp
     from model_backend import EmbeddedModel
@@ -108,6 +112,31 @@ def test_cache_configuration_and_stable_tool_prefix(monkeypatch):
     assert capture.request == first
     capture.create_chat_completion(messages=[{'role': 'user', 'content': 'changed'}], tools=tools)
     assert capture.request != first
+
+
+def test_embedded_inference_reports_a_missing_model_or_llama_cpp(monkeypatch, tmp_path):
+    import sys
+    from model_backend import EmbeddedModel, EMBEDDED_INSTALL_HINT
+    with pytest.raises(ValueError, match='does not exist'):
+        EmbeddedModel({'model_path': str(tmp_path / 'missing.gguf'), 'n_ctx': 1024, 'n_gpu_layers': 0}).load()
+    (tmp_path / 'm.gguf').touch()
+    monkeypatch.setitem(sys.modules, 'llama_cpp', None)  # Simulates llama-cpp-python not being installed.
+    with pytest.raises(RuntimeError, match='requirements-embedded.txt') as raised:
+        EmbeddedModel({'model_path': str(tmp_path / 'm.gguf'), 'n_ctx': 1024, 'n_gpu_layers': 0}).load()
+    assert str(raised.value) == EMBEDDED_INSTALL_HINT
+
+
+def test_cli_starts_without_llama_cpp(tmp_path):
+    import os, subprocess, sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    # A sitecustomize hook makes importing llama_cpp fail in the child process.
+    (tmp_path / 'sitecustomize.py').write_text("import sys\nsys.modules['llama_cpp'] = None\n")
+    env = {**os.environ, 'PYTHONPATH': str(tmp_path), 'LOCAL_CODER_CONFIG_DIR': str(tmp_path / 'config')}
+    done = subprocess.run([sys.executable, str(root / 'main.py'), '--help'], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert 'ask' in done.stdout
 
 
 def _serve(statuses, retry_after=None):
