@@ -84,11 +84,12 @@ def handle_model_command():
 
     typer.echo(f"Loading model: {new_path}...")
     try:
+        import providers
         abs_path = os.path.abspath(new_path)
-        loaded = Llama(model_path=abs_path, n_ctx=current_config['n_ctx'], n_gpu_layers=current_config['n_gpu_layers'], verbose=False)
+        profile = providers.local_profile({**current_config, 'model_path': abs_path})
+        loaded = Llama(model_path=abs_path, n_ctx=profile['n_ctx'], n_gpu_layers=profile['n_gpu_layers'], verbose=False)
         config.set_model_path(abs_path)
-        profile = config.get_model_config()
-        profile['backend'] = 'embedded'
+        profile = providers.local_profile(config.get_model_config())
         config.update_model_config(profile)
         llm = EmbeddedModel(profile)
         llm._model = loaded
@@ -409,7 +410,11 @@ def models(
     elif 'base_url' in updates or 'backend' in updates:
         updates.setdefault('provider', None)
     if updates:
-        profile = {**config.get_model_config(), **updates}
+        current = config.get_model_config()
+        profile = {**current, **updates}
+        if profile.get('backend') == 'embedded' and current.get('provider'):
+            import providers
+            profile = providers.local_profile(profile, keep_context='n_ctx' in updates)
         try:
             create_model(profile)
         except ValueError as exc:
@@ -433,8 +438,8 @@ def models(
 
         # Update configuration
         if config.set_model_path(abs_path):
-            profile = config.get_model_config()
-            profile['backend'] = 'embedded'
+            import providers
+            profile = providers.local_profile(config.get_model_config(), keep_context=context_window is not None)
             config.update_model_config(profile)
             llm = None
             typer.echo(f"✓ Model updated successfully!")

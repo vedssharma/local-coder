@@ -10,6 +10,13 @@ import os
 
 import config
 
+# The window the harness budgets against, not each model's maximum: every step resends the
+# whole context, so a larger window costs more. Override with `models --context-window`.
+DEFAULT_CONTEXT_WINDOW = 128000
+# Hosted APIs return exact usage but expose no tokenizer. Three UTF-8 bytes per token stays
+# below typical English and code density (about 3.5 to 4), so estimates remain conservative.
+BYTES_PER_TOKEN = 3
+
 PROVIDERS = {
     'openai': {'label': 'OpenAI', 'base_url': 'https://api.openai.com/v1', 'key_env': 'OPENAI_API_KEY',
                'models': ['gpt-5', 'gpt-5-mini', 'gpt-4.1']},
@@ -23,7 +30,7 @@ PROVIDERS = {
     'mistral': {'label': 'Mistral', 'base_url': 'https://api.mistral.ai/v1', 'key_env': 'MISTRAL_API_KEY',
                 'models': ['mistral-large-latest', 'codestral-latest']},
     'deepseek': {'label': 'DeepSeek', 'base_url': 'https://api.deepseek.com/v1', 'key_env': 'DEEPSEEK_API_KEY',
-                 'models': ['deepseek-chat', 'deepseek-reasoner']},
+                 'models': ['deepseek-chat', 'deepseek-reasoner'], 'context_window': 64000},
 }
 
 
@@ -79,7 +86,17 @@ def provider_profile(provider, model):
     """Profile updates that point the harness at a hosted model."""
     spec = PROVIDERS[provider]
     return {'backend': 'openai', 'provider': provider, 'base_url': spec['base_url'], 'model': model,
-            'supports_tools': True, 'stream': True, 'request_timeout': 120}
+            'supports_tools': True, 'stream': True, 'request_timeout': 120,
+            'n_ctx': spec.get('context_window', DEFAULT_CONTEXT_WINDOW)}
+
+
+def local_profile(profile, keep_context=False):
+    """Profile for embedded inference. A hosted window would allocate an enormous llama.cpp context."""
+    hosted = bool(profile.get('provider'))
+    profile = {**profile, 'backend': 'embedded', 'provider': None}
+    if hosted and not keep_context:
+        profile['n_ctx'] = config.DEFAULT_CONFIG['n_ctx']
+    return profile
 
 
 def select_provider_interactively(ask=None, say=print, ask_secret=None):

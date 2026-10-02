@@ -231,6 +231,12 @@ class OpenAIModel(ModelAdapter):
             raise ValueError('base_url must be an HTTP(S) URL without embedded credentials')
         self.url = base + '/chat/completions'
 
+    def count_tokens(self, text):
+        if self.profile.get('provider'):
+            import providers
+            return -(-len(text.encode('utf-8')) // providers.BYTES_PER_TOKEN)
+        return super().count_tokens(text)
+
     def _complete(self, **kwargs):
         kwargs['model'] = self.profile.get('model', 'local-model')
         if self.profile.get('server_cache_prompt'):

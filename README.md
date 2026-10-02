@@ -46,6 +46,8 @@ python main.py models --backend openai \
 
 To use a hosted frontier model instead, pick a provider (`openai`, `anthropic`, `google`, `xai`, `mistral`, `deepseek`). You are prompted for the API key with hidden input, or you can set the provider's environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`), which takes precedence. Keys are stored in `~/.local-coder/keys.json` (mode 0600), never in `config.json`. Inside `chat`, `/model` then `api` runs the same selection interactively. Prompts and file context are sent to the provider.
 
+Selecting a provider sets the context window the harness budgets against to 128,000 tokens (64,000 for DeepSeek). This is below most hosted models' maximum on purpose, because each step resends the whole context; pass `--context-window` to change it. Hosted APIs don't expose a tokenizer, so prompt size is estimated at three UTF-8 bytes per token. If you configured a provider before this default existed, run `models --provider ...` again or set `--context-window`. Switching back to a GGUF model restores the local default of 8,192 unless you pass `--context-window`.
+
 ```bash
 python main.py models --provider anthropic --model-name claude-sonnet-5-5 --api-key
 ```
