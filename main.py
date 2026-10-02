@@ -62,8 +62,22 @@ def handle_model_command():
         for i, f in enumerate(other_files, 1):
             typer.echo(f"  {i}. {os.path.basename(f)}")
 
-    typer.echo(f"\nEnter a path to a .gguf file to switch models, or press Enter to keep the current model:")
+    typer.echo(f"\nEnter a path to a .gguf file to switch models, 'api' to use a hosted model (OpenAI, Anthropic, Gemini, ...), or press Enter to keep the current model:")
     new_path = input("> ").strip()
+
+    if new_path.lower() == 'api':
+        import providers
+        try:
+            updates = providers.select_provider_interactively()
+            if updates is None:
+                typer.echo("Keeping current model.\n")
+                return
+            config.update_model_config({**config.get_model_config(), **updates})
+            llm = None
+            typer.echo(f"Switched to: {updates['model']} via {providers.PROVIDERS[updates['provider']]['label']}\n")
+        except (ValueError, OSError) as e:
+            typer.echo(f"Error: {e}\n")
+        return
 
     if not new_path:
         typer.echo("Keeping current model.\n")
@@ -399,6 +413,8 @@ def models(
     draft_tokens: int = typer.Option(None, '--draft-tokens', min=1, max=32),
     draft_ngram_size: int = typer.Option(None, '--draft-ngram-size', min=1, max=8),
     draft_gpu_layers: int = typer.Option(None, '--draft-gpu-layers', min=-1),
+    provider: str = typer.Option(None, '--provider', help='Hosted provider: ' + ', '.join(__import__('providers').PROVIDERS)),
+    api_key: bool = typer.Option(False, '--api-key', help='Prompt for the provider API key (stored privately)'),
 ):
     """Show current model or set a new model."""
     global llm
@@ -413,6 +429,23 @@ def models(
                'draft_tokens': draft_tokens, 'draft_ngram_size': draft_ngram_size,
                'draft_n_gpu_layers': draft_gpu_layers}
     updates = {k: v for k, v in updates.items() if v is not None}
+    if provider:
+        import providers
+        if provider not in providers.PROVIDERS:
+            raise typer.BadParameter(f'Unknown provider; choose from {", ".join(providers.PROVIDERS)}')
+        spec = providers.PROVIDERS[provider]
+        model = updates.get('model') or spec['models'][0]
+        updates = {**providers.provider_profile(provider, model), **updates}
+        if api_key or not providers.resolve_key(updates):
+            key = typer.prompt(f"{spec['label']} API key", hide_input=True, default='', show_default=False)
+            if key:
+                providers.save_key(provider, key)
+            elif not providers.resolve_key(updates):
+                raise typer.BadParameter('An API key is required (or set ' + spec['key_env'] + ')')
+    elif api_key:
+        raise typer.BadParameter('--api-key requires --provider')
+    elif 'base_url' in updates or 'backend' in updates:
+        updates.setdefault('provider', None)
     if updates:
         profile = {**config.get_model_config(), **updates}
         try:
@@ -458,6 +491,10 @@ def models(
         if current_config['backend'] == 'openai':
             typer.echo(f"  Server: {current_config.get('base_url', 'http://127.0.0.1:8080/v1')}")
             typer.echo(f"  Model: {current_config.get('model', 'local-model')}")
+            if current_config.get('provider'):
+                import providers
+                typer.echo(f"  Provider: {current_config['provider']} (API key: "
+                           f"{'set' if providers.resolve_key(current_config) else 'missing'})")
         typer.echo(f"  Model path: {model_path}")
         typer.echo(f"  Context size: {current_config['n_ctx']}")
         typer.echo(f"  GPU layers: {current_config['n_gpu_layers']}")

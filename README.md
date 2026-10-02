@@ -44,6 +44,12 @@ python main.py models --backend openai \
   --context-window 8192 --tools --stream
 ```
 
+To use a hosted frontier model instead, pick a provider (`openai`, `anthropic`, `google`, `xai`, `mistral`, `deepseek`). You are prompted for the API key with hidden input, or you can set the provider's environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`), which takes precedence. Keys are stored in `~/.local-coder/keys.json` (mode 0600), never in `config.json`. Inside `chat`, `/model` then `api` runs the same selection interactively. Prompts and file context are sent to the provider.
+
+```bash
+python main.py models --provider anthropic --model-name claude-sonnet-5-5 --api-key
+```
+
 `--chat-format` selects an embedded llama.cpp chat format. `--no-tools` marks a model that cannot use native tool calls. `--no-stream` disables streaming when a server does not support it. Optional API authentication uses `LOCAL_CODER_API_KEY`, or the environment variable named by `api_key_env` in configuration; never put key values in configuration or source. `request_timeout` controls the server's socket timeout (default 60 seconds).
 
 ## Use the harness

@@ -270,3 +270,34 @@ def test_profile_cli_preserves_named_settings(config_dir):
     import config
     assert config.get_model_config('small')['n_threads'] == 2
     assert config.load_config()['routes']['answer'] == 'small'
+
+
+def test_configure_hosted_provider_stores_key_privately(config_dir, monkeypatch):
+    monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    result = runner.invoke(app, ['models', '--provider', 'anthropic', '--model-name', 'claude-sonnet-5-5'], input='sk-test\n')
+    assert result.exit_code == 0, result.output
+    import config, providers, os, stat
+    profile = config.get_model_config()
+    assert profile['provider'] == 'anthropic' and profile['model'] == 'claude-sonnet-5-5'
+    assert profile['base_url'] == 'https://api.anthropic.com/v1'
+    assert 'sk-test' not in config.CONFIG_FILE.read_text()
+    assert stat.S_IMODE(os.stat(providers.keys_file()).st_mode) == 0o600
+    headers = providers.auth_headers(profile)
+    assert headers['x-api-key'] == 'sk-test' and headers['Authorization'] == 'Bearer sk-test'
+
+
+def test_provider_env_key_overrides_stored(config_dir, monkeypatch):
+    import providers
+    providers.save_key('openai', 'stored')
+    monkeypatch.setenv('OPENAI_API_KEY', 'fromenv')
+    assert providers.resolve_key({'provider': 'openai'}) == 'fromenv'
+
+
+def test_model_command_api_flow(config_dir, monkeypatch):
+    answers = iter(['api', '1', '2', ''])
+    monkeypatch.setattr('builtins.input', lambda _: next(answers))
+    monkeypatch.setattr('getpass.getpass', lambda _: 'sk-abc')
+    app_module.handle_model_command()
+    import config
+    profile = config.get_model_config()
+    assert profile['provider'] == 'openai' and profile['model'] == 'gpt-5-mini'
