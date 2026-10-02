@@ -43,9 +43,7 @@ def run_turn(prompt, files=None, session_id=None, max_tokens=512, profile_name=N
         with Runtime(get_model_instance(profile_name), os.getcwd(), config.CONFIG_DIR,
                      mode=os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only'),
                      context_window=config.get_model_config(profile_name)['n_ctx'],
-                     process_wait_seconds=float(os.environ.get('LOCAL_CODER_PROCESS_WAIT_SECONDS', '2')),
-                     tool_workers=int(os.environ.get('LOCAL_CODER_TOOL_WORKERS', '4')),
-                     subagents=int(os.environ.get('LOCAL_CODER_SUBAGENTS', '4'))) as runtime:
+                     tool_workers=int(os.environ.get('LOCAL_CODER_TOOL_WORKERS', '4'))) as runtime:
             if session_id:
                 runtime.resume(session_id)
             original, contents = parse_file_references(prompt, root=runtime.tools.root)
@@ -71,7 +69,7 @@ def chat(message: str, session_id: str | None = None, max_tokens: int = 512, pro
 
 @mcp.tool()
 def edit(prompt: str, files: list[str] | None = None, max_tokens: int = 2048, profile: str | None = None) -> dict:
-    """Edit using apply_patch; server must be launched in workspace-edit or execute mode."""
+    """Edit using the write and edit tools; server must be launched in workspace-edit or execute mode."""
     if os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only') == 'read-only':
         return {'status': 'blocked', 'text': 'Server is read-only; restart with LOCAL_CODER_PERMISSION_MODE=workspace-edit or execute.'}
     return run_turn(prompt, files, max_tokens=max_tokens, profile_name=profile)

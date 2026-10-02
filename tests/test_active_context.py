@@ -4,12 +4,11 @@ import pytest
 from artifact_store import ArtifactStore
 from session import ContextManager
 from tool_result import ToolResult
-from workspace_tools import WorkspaceTools
 
 
-def exchange(i, name='read_file', status='success', text=None):
+def exchange(i, name='read', status='success', text=None):
     data={'output':text or ('observation '+str(i)+' ')*180}
-    if name=='run_command':
+    if name=='bash':
         data.update(exit_code=1 if status=='failed' else 0, running=False)
     return [{'role':'assistant','content':None,'tool_calls':[{'id':str(i),'type':'function',
         'function':{'name':name,'arguments':json.dumps({'path':'a.py'})}}]},
@@ -19,8 +18,8 @@ def exchange(i, name='read_file', status='success', text=None):
 def test_active_turn_compacts_complete_pairs_and_preserves_failure_evidence(tmp_path):
     context=ContextManager(5500,artifact_dir=tmp_path / '.local-coder/artifacts')
     messages=[{'role':'system','content':'rules'},{'role':'user','content':'Fix the failing check'}]
-    messages += exchange(0,'run_command','failed')
-    messages += exchange(1,'apply_patch',text='Patched a.py')
+    messages += exchange(0,'bash','failed')
+    messages += exchange(1,'edit',text='Edited a.py')
     for i in range(2,7):
         messages += exchange(i)
     context.fit(messages,[],300)
@@ -29,20 +28,18 @@ def test_active_turn_compacts_complete_pairs_and_preserves_failure_evidence(tmp_
     ids={c['id'] for m in messages for c in m.get('tool_calls',[])}
     assert ids=={m['tool_call_id'] for m in messages if m['role']=='tool'}
     memory=next(m for m in messages if m.get('name')=='active_tool_memory')
-    assert memory['role']=='user' and 'failed' in memory['content'] and 'apply_patch' in memory['content']
+    assert memory['role']=='user' and 'failed' in memory['content'] and 'edit' in memory['content']
     assert list((tmp_path / '.local-coder/artifacts').glob('*.txt'))
 
 
 def test_last_large_failure_preserves_status_exit_code_and_retrievable_archive(tmp_path):
     context=ContextManager(2400,artifact_dir=tmp_path / '.local-coder/artifacts')
-    messages=[{'role':'user','content':'Check'}]+exchange(0,'run_command','failed',text='failure trace\n'*1000)
+    messages=[{'role':'user','content':'Check'}]+exchange(0,'bash','failed',text='failure trace\n'*1000)
     context.fit(messages,[],100)
     result=json.loads(messages[-1]['content'])
     assert result['status']=='failed' and result['data']['exit_code']==1
-    tools=WorkspaceTools(tmp_path)
-    archive=tools.execute_tool('read_artifact',{'artifact_id':result['artifacts'][0],'max_bytes':12000})
-    assert archive.status=='success' and 'failure trace' in archive.data['text']
-    assert not archive.data['eof']
+    archive=ArtifactStore(tmp_path / '.local-coder/artifacts').read(result['artifacts'][0],0,12000)
+    assert 'failure trace' in archive['text'] and not archive['eof']
 
 
 def test_artifact_reader_rejects_traversal_and_symlink_escape(tmp_path):

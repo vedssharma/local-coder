@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ from runtime import Runtime
 
 CASES = ('navigation', 'bug_fix', 'multi_file', 'recovery', 'permissions', 'resume')
 TEST_COMMAND = [sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-v']
+TEST_SHELL = ' '.join(shlex.quote(part) for part in TEST_COMMAND)
 
 
 def call(name, **args):
@@ -44,10 +46,7 @@ class ScriptedModel:
                     result = result.get('data')
             except (ValueError, TypeError):
                 pass
-        if isinstance(result, dict) and result.get('running'):
-            action = call('poll_process', process_id=result['process_id'])
-        else:
-            action = self.actions.popleft() if self.actions else 'Done.'
+        action = self.actions.popleft() if self.actions else 'Done.'
         if isinstance(action, str):
             message = {'role': 'assistant', 'content': action}
             reason = 'stop'
@@ -92,20 +91,20 @@ def snapshot(root):
 
 
 def actions(case):
-    read = call('read_file', path='calc/core.py')
-    fix = call('apply_patch', path='calc/core.py', old_text='return a - b', new_text='return a + b')
-    check = call('run_command', argv=TEST_COMMAND)
-    diff = call('git_diff')
+    read = call('read', path='calc/core.py')
+    fix = call('edit', path='calc/core.py', old_text='return a - b', new_text='return a + b')
+    check = call('bash', command=TEST_SHELL, verification=True)
+    diff = call('bash', command='git diff HEAD')
     if case == 'navigation':
-        return [call('search_code', pattern='def add'), read, 'add is defined in calc/core.py and exported from calc/__init__.py.']
+        return [call('bash', command='rg -n "def add" .'), read, 'add is defined in calc/core.py and exported from calc/__init__.py.']
     if case == 'permissions':
-        return [call('apply_patch', path='calc/core.py', old_text='return a + b', new_text='return 0'), 'Edits are unavailable in read-only mode.']
+        return [call('edit', path='calc/core.py', old_text='return a + b', new_text='return 0'), 'Edits are unavailable in read-only mode.']
     if case == 'resume':
         return [read, 'add incorrectly subtracts; the fix is to return a + b.', fix, check, diff, 'Fixed and verified.']
     if case == 'multi_file':
-        return [read, call('apply_patch', path='calc/core.py', old_text='    return a + b\n',
+        return [read, call('edit', path='calc/core.py', old_text='    return a + b\n',
                           new_text='    return a + b\n\ndef multiply(a, b):\n    return a * b\n'),
-                call('apply_patch', path='calc/__init__.py', old_text='from .core import add',
+                call('edit', path='calc/__init__.py', old_text='from .core import add',
                      new_text='from .core import add, multiply'), check, diff, 'Implemented and verified multiply.']
     return ([check] if case == 'recovery' else []) + [read, fix, check, diff, 'Fixed and verified add.']
 
@@ -152,7 +151,7 @@ def evaluate(case, scripted=False, profile=None, model=None):
         tests = subprocess.run(TEST_COMMAND, cwd=root, capture_output=True, text=True, timeout=20)
         command_exits = []
         for event in events:
-            if event['type'] == 'tool_finished' and event['name'] in ('run_command', 'poll_process'):
+            if event['type'] == 'tool_finished' and event['name'] == 'bash':
                 try:
                     output = event['result']['data']
                     if not output['running']:
@@ -168,7 +167,7 @@ def evaluate(case, scripted=False, profile=None, model=None):
         if case == 'recovery':
             checks['agent_observed_initial_failure'] = 1 in command_exits
         if case == 'navigation':
-            checks['repository_observed'] = any(e['type'] == 'tool_finished' and e['name'] in ('read_file', 'search_code') and e['result']['status'] == 'success' for e in events)
+            checks['repository_observed'] = any(e['type'] == 'tool_finished' and e['name'] in ('read', 'bash') and e['result']['status'] == 'success' for e in events)
             checks['correct_locations'] = 'calc/core.py' in final.text and 'calc/__init__.py' in final.text
         return {'case': case, 'passed': all(checks.values()), 'checks': checks,
                 'outcome': final.status, 'reason': final.reason, 'seconds': round(elapsed, 3),

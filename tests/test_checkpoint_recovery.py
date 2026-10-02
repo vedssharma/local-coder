@@ -70,13 +70,13 @@ runtime.turn('append once')
 def test_interrupted_patch_requires_reading_affected_file(tmp_path):
     (tmp_path/'a').write_text('applied')
     store=SessionStore(tmp_path/'state/sessions',tmp_path)
-    message=call_response('apply_patch',{'path':'a','old_text':'old','new_text':'applied'})['choices'][0]['message']
+    message=call_response('edit',{'path':'a','old_text':'old','new_text':'applied'})['choices'][0]['message']
     message['role']='assistant'
     key=store.save([{'role':'user','content':'edit'},message],checkpoint={'calls':{'call':{
-        'state':'executing','name':'apply_patch','side_effects':'filesystem',
+        'state':'executing','name':'edit','side_effects':'filesystem',
         'arguments':{'path':'a','old_text':'old','new_text':'applied'}}}})
-    model=MagicMock();model.create_chat_completion.side_effect=[call_response('read_file',{'path':'a'}),
-        call_response('apply_patch',{'path':'a','old_text':'applied','new_text':'reviewed'}),answer()]
+    model=MagicMock();model.create_chat_completion.side_effect=[call_response('read',{'path':'a'}),
+        call_response('edit',{'path':'a','old_text':'applied','new_text':'reviewed'}),answer()]
     with Runtime(model,tmp_path,tmp_path/'state',mode='workspace-edit') as runtime:
         runtime.resume(key)
         assert runtime.interrupted_operations

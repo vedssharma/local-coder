@@ -74,9 +74,9 @@ class TestBuildSystemMessage:
         monkeypatch.chdir(tmp_path)
         msg = prompt_builder.build_system_message()
         content = msg["content"]
-        assert "read_file" in content
-        assert "list_directory" in content
-        assert "search_code" in content
+        assert "read" in content
+        assert "edit" in content
+        assert "bash" in content
 
     def test_injects_context_md_when_present(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -103,8 +103,8 @@ class TestBuildEditSystemMessage:
     def test_mentions_read_and_write(self):
         msg = prompt_builder.build_edit_system_message()
         content = msg["content"]
-        assert "read_file" in content
-        assert "apply_patch" in content
+        assert "read" in content
+        assert "edit" in content
 
     def test_no_tool_injection(self):
         # Edit system message should NOT contain context from CONTEXT.md

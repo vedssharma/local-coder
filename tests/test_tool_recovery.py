@@ -19,7 +19,7 @@ def test_transient_read_retries_but_commands_do_not(tmp_path):
         ExecutionContext(time.monotonic() + 2, threading.Event()), events.append)
     assert result.status == 'success' and result.attempts == 2
     assert events[0]['type'] == 'tool_retry'
-    for name in ('run_command', 'bash', 'apply_patch'):
+    for name in ('bash', 'edit', 'write'):
         execute = MagicMock(return_value=ToolResult.error('io_error', 'temporary', True))
         result = execute_with_recovery(tools.registry.get(name), execute,
             ExecutionContext(time.monotonic() + 2, threading.Event()), events.append)
@@ -48,7 +48,7 @@ def test_semantic_cycles_stop_but_advancing_polls_and_changed_reads_continue():
 
 def test_native_stale_patch_has_recoverable_error_code(tmp_path):
     (tmp_path / 'a').write_text('current')
-    result = WorkspaceTools(tmp_path, mode='workspace-edit').execute_tool('apply_patch', {
+    result = WorkspaceTools(tmp_path, mode='workspace-edit').execute_tool('edit', {
         'path': 'a', 'old_text': 'stale', 'new_text': 'new'})
     assert result.error_code == 'stale_patch' and not result.retryable
     assert (tmp_path / 'a').read_text() == 'current'
