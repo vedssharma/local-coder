@@ -241,9 +241,8 @@ class OpenAIModel(ModelAdapter):
         if kwargs['stream']:
             kwargs['stream_options'] = {'include_usage': True}
         headers = {'Content-Type': 'application/json'}
-        key_name = self.profile.get('api_key_env', 'LOCAL_CODER_API_KEY')
-        if os.environ.get(key_name):
-            headers['Authorization'] = 'Bearer ' + os.environ[key_name]
+        import providers
+        headers.update(providers.auth_headers(self.profile))
         request = urllib.request.Request(self.url, data=json.dumps(kwargs).encode(), headers=headers)
         context = self.execution_context
         timeout = context.timeout(self.profile.get('request_timeout', 60)) if context else self.profile.get('request_timeout', 60)
