@@ -5,7 +5,7 @@ from pathlib import Path
 import threading
 import time
 
-from agent import run_agent, RunBudget
+from agent import run_agent, RunBudget, default_output_tokens
 from model_backend import ModelAdapter
 from prompt_builder import build_messages
 from session import ContextManager, SessionStore
@@ -40,7 +40,7 @@ class Runtime:
         self.trace = trace
         self.task_kind = task_kind
         self.tool_executor = None
-        self.max_tokens = 512
+        self.max_tokens = default_output_tokens(context_window)
 
     def emit(self, event):
         with self._emit_lock:
@@ -69,7 +69,7 @@ class Runtime:
         self.context.task = None
         self.context.active_notes = []
 
-    def turn(self, prompt, file_contents=None, max_tokens=512):
+    def turn(self, prompt, file_contents=None, max_tokens=None):
         if self.session_id is None:
             self.session_id = self.store.save(self.messages,checkpoint=self.checkpoint)
         with self.store.lease(self.session_id):
@@ -111,7 +111,9 @@ class Runtime:
             self.store.save(self.messages,self.session_id,self.checkpoint)
 
 
-    def _turn(self, prompt, file_contents=None, max_tokens=512):
+    def _turn(self, prompt, file_contents=None, max_tokens=None):
+        if max_tokens is None:
+            max_tokens = default_output_tokens(self.context.window)
         if not isinstance(max_tokens, int) or max_tokens <= 0:
             raise ValueError('max_tokens must be positive')
         self.max_tokens = max_tokens

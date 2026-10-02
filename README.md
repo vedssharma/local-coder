@@ -67,6 +67,8 @@ python main.py edit "Fix the failing tests and verify the changes" --mode execut
 python main.py chat --mode execute --max-steps 60 --max-seconds 600 --token-budget 16384
 ```
 
+`--max-tokens` limits the output of each model call. It defaults to a quarter of the context window, between 512 and 4096 tokens, so a `write` call has room for a whole file without crowding out the prompt. `--token-budget` limits the total generated in a turn. If a tool call is cut off at the limit, it is not executed; the model is asked once to make the change in smaller steps, and a second cut-off ends the run as `budget_exhausted`.
+
 The model has exactly six tools:
 
 - `read`: a line range of a workspace file (default 100 lines).

@@ -37,7 +37,7 @@ def get_model_instance(profile_name=None):
     return _model
 
 
-def run_turn(prompt, files=None, session_id=None, max_tokens=512, profile_name=None):
+def run_turn(prompt, files=None, session_id=None, max_tokens=None, profile_name=None):
     # One model/session write at a time. No shared mutable transcripts across callers.
     with _lock:
         with Runtime(get_model_instance(profile_name), os.getcwd(), config.CONFIG_DIR,
@@ -56,19 +56,19 @@ def run_turn(prompt, files=None, session_id=None, max_tokens=512, profile_name=N
 
 
 @mcp.tool()
-def ask(prompt: str, files: list[str] | None = None, max_tokens: int = 512, profile: str | None = None) -> dict:
+def ask(prompt: str, files: list[str] | None = None, max_tokens: int | None = None, profile: str | None = None) -> dict:
     """Ask a question; returns text, explicit run status, and a resumable session ID."""
     return run_turn(prompt, files, max_tokens=max_tokens, profile_name=profile)
 
 
 @mcp.tool()
-def chat(message: str, session_id: str | None = None, max_tokens: int = 512, profile: str | None = None) -> dict:
+def chat(message: str, session_id: str | None = None, max_tokens: int | None = None, profile: str | None = None) -> dict:
     """Continue a saved session, retaining tool observations and decisions."""
     return run_turn(message, session_id=session_id, max_tokens=max_tokens, profile_name=profile)
 
 
 @mcp.tool()
-def edit(prompt: str, files: list[str] | None = None, max_tokens: int = 2048, profile: str | None = None) -> dict:
+def edit(prompt: str, files: list[str] | None = None, max_tokens: int | None = None, profile: str | None = None) -> dict:
     """Edit using the write and edit tools; server must be launched in workspace-edit or execute mode."""
     if os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only') == 'read-only':
         return {'status': 'blocked', 'text': 'Server is read-only; restart with LOCAL_CODER_PERMISSION_MODE=workspace-edit or execute.'}
