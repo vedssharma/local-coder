@@ -7,8 +7,6 @@ from jsonschema.validators import validator_for
 
 
 MODES = ('read-only', 'workspace-edit', 'execute')
-MCP_READ_TOOLS = frozenset({'read_text_file', 'read_multiple_files', 'directory_tree', 'get_file_info',
-                          'list_allowed_directories', 'search_files', 'list_directory_with_sizes'})
 
 
 @dataclass(frozen=True)
@@ -23,8 +21,6 @@ class ToolSpec:
     task_kinds: tuple[str, ...] = ('all',)
     default_timeout: int | None = None
     max_timeout: int | None = None
-    native: bool = True
-    wait_for_process: bool = False
     retry_safe: bool = False
     validator: object = field(init=False, repr=False, compare=False)
 
@@ -39,8 +35,6 @@ class ToolSpec:
             raise ValueError('Only tools without side effects can reuse observations')
         if self.compact_observation and not self.cacheable:
             raise ValueError('Observation compaction requires a cacheable tool')
-        if self.wait_for_process and self.side_effects != 'process':
-            raise ValueError('Process waiting requires a process tool')
         if self.retry_safe and self.side_effects not in ('none', 'network'):
             raise ValueError('Only explicitly safe reads may be retried')
         definition = deepcopy(self.schema)

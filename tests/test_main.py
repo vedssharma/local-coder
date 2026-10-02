@@ -32,16 +32,6 @@ def _patch_llm(text="mocked answer"):
     return patch("main.get_llm", return_value=mock)
 
 
-def _patch_mcp(connected=True):
-    """Return a context manager that replaces get_mcp_client() with a mock."""
-    mock = MagicMock()
-    mock.is_connected = connected
-    mock.tool_names = set()
-    mock.get_openai_tool_schemas.return_value = []
-    mock.call_tool.return_value = "tool result"
-    return patch("main.get_mcp_client", return_value=mock)
-
-
 # ---------------------------------------------------------------------------
 # models command — display
 # ---------------------------------------------------------------------------
@@ -112,14 +102,8 @@ class TestModelsCommandSet:
 class TestAskCommand:
     def test_ask_basic_question(self, config_dir, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        with _patch_llm("The answer is 42."), _patch_mcp():
+        with _patch_llm("The answer is 42."):
             result = runner.invoke(app, ["ask", "What is 6 times 7?"])
-        assert result.exit_code == 0
-
-    def test_ask_with_no_mcp_flag(self, config_dir, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        with _patch_llm("answer"):
-            result = runner.invoke(app, ["ask", "--no-mcp", "What is 2+2?"])
         assert result.exit_code == 0
 
     def test_ask_respects_max_tokens_option(self, config_dir, tmp_path, monkeypatch):
@@ -133,7 +117,7 @@ class TestAskCommand:
             }
         )
 
-        with patch("main.get_llm", return_value=mock_llm), _patch_mcp():
+        with patch("main.get_llm", return_value=mock_llm):
             runner.invoke(app, ["ask", "--max-tokens", "256", "Question"])
 
         assert captured_kwargs.get("max_tokens") == 256
@@ -179,33 +163,6 @@ class TestGatherProjectContext:
         monkeypatch.chdir(tmp_path)
         ctx = app_module._gather_project_context()
         assert isinstance(ctx, str)
-
-
-# ---------------------------------------------------------------------------
-# get_mcp_client — lazy initialisation
-# ---------------------------------------------------------------------------
-
-class TestGetMCPClient:
-    def test_returns_same_instance_on_second_call(self, monkeypatch):
-        # Reset module-level singleton
-        monkeypatch.setattr(app_module, "_mcp_client", None)
-
-        fake_client = MagicMock()
-        fake_client.is_connected = True
-        fake_client.tool_names = {"read_file"}
-
-        with patch("main.MCPClient", return_value=fake_client):
-            c1 = app_module.get_mcp_client()
-            c2 = app_module.get_mcp_client()
-
-        assert c1 is c2
-        fake_client.connect.assert_called_once()
-
-    def test_reuses_existing_client(self, monkeypatch):
-        existing = MagicMock()
-        monkeypatch.setattr(app_module, "_mcp_client", existing)
-        result = app_module.get_mcp_client()
-        assert result is existing
 
 
 # ---------------------------------------------------------------------------

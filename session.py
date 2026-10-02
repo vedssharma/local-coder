@@ -266,7 +266,7 @@ class ContextManager:
         self.active_notes.append(note)
         # Keep the latest failure and mutation/check summaries alongside recent observations.
         important = [n for n in self.active_notes if any(o.get('status') in ('error','failed','timed_out') for o in n['outcomes'])
-                     or any(c['name'] in ('apply_patch','run_command','bash') for c in n['calls'])]
+                     or any(c['name'] in ('write','edit','bash') for c in n['calls'])]
         selected = important[-3:] + [n for n in self.active_notes[-3:] if n not in important[-3:]]
         self.active_notes = selected
         messages[:] = [m for m in messages if m.get('name')!='active_tool_memory']
@@ -299,7 +299,7 @@ class ContextManager:
         if len(output.encode()) <= 4000:
             return output
         artifact = self.retain_artifact(output)
-        reference = ('Full output artifact: '+artifact+'; read_artifact supports byte offsets.' if artifact else
+        reference = ('Full output saved to .local-coder/artifacts/'+artifact+'; use read with start_line/end_line to page through it.' if artifact else
                      'Could not retain full output; narrow the tool request.')
         return output[:1800] + '\n[output truncated]\n' + output[-1200:] + '\n' + reference
 

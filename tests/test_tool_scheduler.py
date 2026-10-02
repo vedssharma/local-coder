@@ -35,13 +35,13 @@ def test_mutation_is_a_barrier_and_duplicate_reads_share_one_execution(tmp_path)
     tools=WorkspaceTools(tmp_path, mode='workspace-edit')
     state={'value':'old'}
     read=MagicMock(side_effect=lambda args:state['value'])
-    def edit(args):
+    def change(args):
         state['value']='new'
         return 'edited'
-    tools.registry.register(ToolSpec(schema('read', 'Read', {}), read, side_effects='none',
+    tools.registry.register(ToolSpec(schema('observe', 'Observe', {}), read, side_effects='none',
         concurrency='parallel', cacheable=True))
-    tools.registry.register(ToolSpec(schema('edit', 'Edit', {}), edit, minimum_mode='workspace-edit', side_effects='filesystem'))
-    model=MagicMock();model.create_chat_completion.side_effect=responses(['read','read','edit','read'])
+    tools.registry.register(ToolSpec(schema('change', 'Change', {}), change, minimum_mode='workspace-edit', side_effects='filesystem'))
+    model=MagicMock();model.create_chat_completion.side_effect=responses(['observe','observe','change','observe'])
     messages=[]
     assert run_agent(model,messages,mcp_client=tools).status=='completed'
     assert read.call_count==2

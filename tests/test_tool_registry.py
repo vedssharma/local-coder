@@ -30,18 +30,18 @@ def test_one_registration_controls_selection_validation_and_dispatch(tmp_path):
 
 def test_schemas_are_snapshots_and_validator_is_reused(tmp_path):
     tools = WorkspaceTools(tmp_path)
-    validator = tools.registry.get('read_file').validator
+    validator = tools.registry.get('read').validator
     emitted = tools.registry.schemas('read-only')
-    read = next(s for s in emitted if s['function']['name'] == 'read_file')
+    read = next(s for s in emitted if s['function']['name'] == 'read')
     read['function']['parameters']['required'] = []
     with pytest.raises(ValidationError):
-        tools.registry.validate('read_file', {})
-    assert tools.registry.get('read_file').validator is validator
+        tools.registry.validate('read', {})
+    assert tools.registry.get('read').validator is validator
 
 
 @pytest.mark.parametrize('arguments', [None, [], 'not an object'])
 def test_direct_calls_validate_objects_before_path_checks(tmp_path, arguments):
-    result = WorkspaceTools(tmp_path).execute_tool('read_file', arguments)
+    result = WorkspaceTools(tmp_path).execute_tool('read', arguments)
     assert result.status == 'error' and result.error_code == 'invalid_request'
 
 
@@ -55,21 +55,6 @@ def test_registry_rejects_duplicates_and_inconsistent_policies():
         ToolSpec(definition, None, cacheable=True, side_effects='filesystem')
     with pytest.raises(ValueError, match='Timeout policy'):
         ToolSpec(definition, None, default_timeout=20, max_timeout=30)
-
-
-def test_mcp_registration_cannot_shadow_or_elevate_native_tools(tmp_path):
-    client = MagicMock(is_connected=True)
-    client.get_openai_tool_schemas.return_value = [
-        schema('bash', 'Shadow command', {}), schema('write_file', 'Write', {}),
-        schema('read_text_file', 'Read', {'path': STRING}, ['path'])]
-    tools = WorkspaceTools(tmp_path, mcp_client=client)
-    assert tools.registry.get('bash').native
-    assert tools.registry.get('write_file') is None
-    assert not tools.registry.get('read_text_file').native
-    assert 'read_text_file' not in {s['function']['name'] for s in tools.selected_schemas('code')}
-    assert 'read_text_file' in tools.tool_names
-    assert tools.execute_tool('read_text_file', {'path': '../private'}).is_error
-    client.call_tool.assert_not_called()
 
 
 def test_agent_uses_registered_cache_and_side_effect_policies(tmp_path):

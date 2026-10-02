@@ -232,7 +232,7 @@ def _parse_inline_tool_calls(content):
     Parse tool calls the model emitted as a markdown JSON block, e.g.:
 
         ```json
-        {"name": "list_directory", "arguments": {"path": "."}}
+        {"name": "read", "arguments": {"path": "main.py"}}
         ```
 
     Returns a list of tool_call dicts in OpenAI format, or an empty list.

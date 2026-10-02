@@ -1,14 +1,20 @@
 """Observed command evidence, independent of the model's completion claims."""
 import json
 from pathlib import Path
+import shlex
 
 
 def is_check(name, arguments):
     if arguments.get('verification') is True:
         return True
-    if name!='run_command':
+    if name!='bash':
         return False
-    argv=arguments.get('argv',[])
+    try:
+        argv=shlex.split(arguments.get('command',''))
+    except ValueError:
+        return False
+    while argv and '=' in argv[0] and not argv[0].startswith(('/','.')):
+        argv=argv[1:]  # leading VAR=value assignments
     if not argv:
         return False
     program=Path(argv[0]).name
@@ -34,16 +40,15 @@ class VerificationLedger:
             return
         self.state['observed_calls'].append(call_id)
         if result.changed_files:
-            if name=='apply_patch':
+            if name in ('write','edit'):
                 self.state['revision']+=1
             self.state['changed_files']=sorted(set(self.state['changed_files'])|set(result.changed_files))
         data=result.data
-        if name not in ('run_command','bash','poll_process','cancel_process') or not isinstance(data,dict) or not data.get('process_id'):
+        if name!='bash' or not isinstance(data,dict) or not data.get('process_id'):
             return
         key=data['process_id']
         record=self.state['commands'].get(key,{})
-        if name in ('run_command','bash'):
-            record={'name':name,'arguments':arguments,'verification':is_check(name,arguments),
+        record={'name':name,'arguments':arguments,'verification':is_check(name,arguments),
                     'revision':self.state['revision'],'identity':json.dumps([name,arguments],sort_keys=True)}
         record.update(process_id=key,status=result.status,exit_code=data.get('exit_code'),
                       running=data.get('running',False),artifacts=result.artifacts,

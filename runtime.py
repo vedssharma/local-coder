@@ -10,24 +10,22 @@ from model_backend import ModelAdapter
 from prompt_builder import build_messages
 from session import ContextManager, SessionStore
 from workspace_tools import WorkspaceTools
-from process_orchestration import ProcessOrchestrator, validate_wait_seconds
+from execution_context import ExecutionContext
 from checkpoint_recovery import recover_checkpoint
-from tool_result import ToolResult
+from tool_result import ToolResult, invoke_tool
 from verification import VerificationLedger
-from subagents import SubagentManager, in_subagent
 
 
 class Runtime:
-    def __init__(self, model, workspace, state_dir, mode='read-only', mcp_client=None,
+    def __init__(self, model, workspace, state_dir, mode='read-only',
                  emit=None, budget=None, context_window=8192, trace=False, task_kind="auto",
-                 process_wait_seconds=2, tool_workers=4, subagents=0):
+                 tool_workers=4):
         if type(tool_workers) is not int or not 1 <= tool_workers <= 8:
             raise ValueError('tool_workers must be between 1 and 8')
         self.tool_workers = tool_workers
         self._emit_lock = threading.RLock()
-        self.process_wait_seconds = validate_wait_seconds(process_wait_seconds)
         self.model = model
-        self.tools = WorkspaceTools(workspace, mcp_client=mcp_client, mode=mode)
+        self.tools = WorkspaceTools(workspace, mode=mode)
         self.store = SessionStore(Path(state_dir) / 'sessions', workspace)
         self.context = ContextManager(context_window,
             count_tokens=model.count_tokens if isinstance(model, ModelAdapter) else None,
@@ -43,11 +41,8 @@ class Runtime:
         self.task_kind = task_kind
         self.tool_executor = None
         self.max_tokens = 512
-        self.subagents = SubagentManager(self, subagents)
 
     def emit(self, event):
-        if in_subagent() and event['type'] in ('assistant_delta', 'inference_metrics'):
-            return
         with self._emit_lock:
             self.sink(event)
             if self.trace:
@@ -115,15 +110,11 @@ class Runtime:
                         record.update(state='interrupted',inspection_required=True)
             self.store.save(self.messages,self.session_id,self.checkpoint)
 
-    def record_subagent_evidence(self, call_id, name, arguments, result):
-        with self._checkpoint_lock:
-            VerificationLedger(self.checkpoint.setdefault('evidence', {})).observe(call_id, name, arguments, result)
 
     def _turn(self, prompt, file_contents=None, max_tokens=512):
         if not isinstance(max_tokens, int) or max_tokens <= 0:
             raise ValueError('max_tokens must be positive')
         self.max_tokens = max_tokens
-        self.subagents.reset()
         self.cancel_event.clear()
         history = [m for m in self.messages if m.get('role') != 'system' or m.get('name') == 'working_memory']
         file_contents = file_contents or {}
@@ -142,14 +133,16 @@ class Runtime:
             self.model.emit = self.emit
             self.model.cancel_event = self.cancel_event
         result = None
-        orchestrator = ProcessOrchestrator(self.tools, self.process_wait_seconds,
-            time.monotonic() + self.budget.max_seconds, self.cancel_event, self.emit)
+        execution_context = ExecutionContext(time.monotonic() + self.budget.max_seconds, self.cancel_event)
         def execute(name,args):
             spec=self.tools.registry.get(name)
             if self.interrupted_operations and spec and spec.side_effects in ('filesystem','process','unknown'):
                 return ToolResult.error('inspection_required','Inspect interrupted operations before making further changes; commands require explicit acknowledgement.')
-            outcome=orchestrator(name,args)
-            if name=='read_file' and (outcome.status=='success' or outcome.error_code=='not_found'):
+            if self.cancel_event.is_set():
+                return ToolResult(status='cancelled', error_code='interrupted')
+            with execution_context.bind():
+                outcome=invoke_tool(self.tools,name,args)
+            if name=='read' and (outcome.status=='success' or outcome.error_code=='not_found'):
                 for record in self.interrupted_operations.values():
                     if record.get('side_effects')=='filesystem' and isinstance(record.get('arguments'),dict):
                         original=record['arguments'].get('path')
@@ -162,7 +155,7 @@ class Runtime:
                                budget=self.budget, cancel_event=self.cancel_event,
                                emit=self.emit, context_manager=self.context,
                                tool_schemas=self.tools.selected_schemas(self.task_kind),
-                               tool_executor=execute, execution_context=orchestrator.context, tool_workers=self.tool_workers,
+                               tool_executor=execute, execution_context=execution_context, tool_workers=self.tool_workers,
                                checkpoint=self.checkpoint_call, reserved_call_ids=set(self.checkpoint.get('calls',{})))
             if result.status in ('cancelled','budget_exhausted'):
                 self.tools.cancel_all_processes()

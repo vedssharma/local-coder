@@ -21,6 +21,6 @@ File references in `@path` form and explicit `files` are confined to the workspa
 
 Use the optional `profile` argument on coding tools to select a saved named model. Check inference benchmarks and coding evaluations before choosing a smaller model for a task.
 
-Commands are briefly polled by the runtime before results reach the model. A returned running process handle is not a completed check; poll it or cancel it. The launch-time `LOCAL_CODER_PROCESS_WAIT_SECONDS` control defaults to 2 seconds.
+The `bash` tool runs each command to completion (or its timeout) before the result reaches the model.
 
-Use `verification_status` and observed `checks`/exit codes to assess validation, alongside `changed_files` and `outstanding_processes`. `passed` describes observed validation commands, not test coverage or task correctness. Resume never automatically replays interrupted effects; inspect the reported operation before taking further action. Retained tool payloads can be retrieved through the harness's `read_artifact` tool.
+Use `verification_status` and observed `checks`/exit codes to assess validation, alongside `changed_files` and `outstanding_processes`. `passed` describes observed validation commands, not test coverage or task correctness. Resume never automatically replays interrupted effects; inspect the reported operation before taking further action. Retained tool payloads are saved under `.local-coder/artifacts/` and can be paged with the harness's `read` tool.

@@ -15,10 +15,8 @@ def test_shared_context_caps_command_deadline_even_without_wait(tmp_path):
     tools = WorkspaceTools(tmp_path, mode='execute')
     context = ExecutionContext(time.monotonic() + .15, threading.Event())
     try:
-        result = tools.execute_tool('run_command', {'argv': [sys.executable, '-c', 'import time; time.sleep(30)']}, context=context)
-        state = tools.processes[result.data['process_id']]
-        state['proc'].wait(timeout=1)
-        assert tools.execute_tool('poll_process', {'process_id': result.data['process_id']}).status == 'timed_out'
+        result = tools.execute_tool('bash', {'command': 'sleep 30'}, context=context)
+        assert result.status == 'timed_out'
     finally:
         tools.close()
 
@@ -27,10 +25,10 @@ def test_expired_or_cancelled_context_never_starts_mutation(tmp_path):
     tools = WorkspaceTools(tmp_path, mode='workspace-edit')
     event = threading.Event()
     context = ExecutionContext(time.monotonic() - 1, event)
-    args = {'path': 'forbidden', 'old_text': '', 'new_text': 'bad'}
-    assert tools.execute_tool('apply_patch', args, context=context).error_code == 'run_deadline'
+    args = {'path': 'forbidden', 'content': 'bad'}
+    assert tools.execute_tool('write', args, context=context).error_code == 'run_deadline'
     event.set()
-    assert tools.execute_tool('apply_patch', args, context=context).status == 'cancelled'
+    assert tools.execute_tool('write', args, context=context).status == 'cancelled'
     assert not (tmp_path / 'forbidden').exists()
 
 
