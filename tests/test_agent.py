@@ -368,6 +368,34 @@ def test_cancelled_and_truncated_calls_do_not_execute(mock_llm, mock_mcp_client)
     mock_mcp_client.call_tool.assert_not_called()
 
 
+def test_truncated_tool_call_asks_for_smaller_steps_once(mock_llm, mock_mcp_client):
+    truncated = _make_tool_call_response('read_file', {'path': 'x'})
+    truncated['choices'][0]['finish_reason'] = 'length'
+    mock_llm.create_chat_completion.side_effect = [truncated, _make_text_response('done')]
+    messages = []
+    result = agent.run_agent(mock_llm, messages, max_tokens=300, mcp_client=mock_mcp_client)
+    assert result.status == 'completed'
+    mock_mcp_client.call_tool.assert_not_called()
+    # The cut-off call never enters the transcript; only the recovery note does.
+    assert not any(m.get('tool_calls') for m in messages)
+    recovery = [m for m in messages if m.get('name') == 'agent_recovery']
+    assert len(recovery) == 1 and '300-token output limit' in recovery[0]['content']
+
+
+def test_text_truncation_still_ends_the_run(mock_llm):
+    response = _make_text_response('partial')
+    response['choices'][0]['finish_reason'] = 'length'
+    mock_llm.create_chat_completion.return_value = response
+    result = agent.run_agent(mock_llm, [])
+    assert (result.status, result.reason, result.text) == ('budget_exhausted', 'output_truncated', 'partial')
+    assert mock_llm.create_chat_completion.call_count == 1
+
+
+@pytest.mark.parametrize('window, expected', [(2048, 512), (8192, 2048), (16384, 4096), (200000, 4096)])
+def test_default_output_tokens_scale_with_context(window, expected):
+    assert agent.default_output_tokens(window) == expected
+
+
 def test_duplicate_reads_execute_once_per_batch_and_keep_protocol(mock_llm, mock_mcp_client):
     response = _make_tool_call_response('read_file', {'path': 'a'})
     second = json.loads(json.dumps(response['choices'][0]['message']['tool_calls'][0]))

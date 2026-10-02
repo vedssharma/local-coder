@@ -143,7 +143,7 @@ def handle_md_command(console, max_tokens):
     """Handle the /md slash command: explore the project and generate CONTEXT.md."""
     typer.echo("\nGenerating CONTEXT.md by exploring the project...\n")
 
-    md_max_tokens = max(max_tokens, 2048)
+    md_max_tokens = max(max_tokens or 0, 2048)
 
     # Step 1: Gather real project data from disk (no LLM needed)
     typer.echo("Reading project files...\n")
@@ -249,7 +249,7 @@ def execute_turn(runtime, prompt, max_tokens):
 @app.command()
 def ask(
     prompt: str = typer.Argument(...),
-    max_tokens: int = typer.Option(512, '--max-tokens', '-n', min=1),
+    max_tokens: int = typer.Option(None, '--max-tokens', '-n', min=1, help='Output tokens per model call (default: a quarter of the context window, 512 to 4096)'),
     mode: str = typer.Option('read-only', '--mode'),
     max_steps: int = typer.Option(30, min=1),
     max_seconds: float = typer.Option(300, min=1),
@@ -270,7 +270,7 @@ def ask(
 
 @app.command()
 def chat(
-    max_tokens: int = typer.Option(512, '--max-tokens', '-n', min=1),
+    max_tokens: int = typer.Option(None, '--max-tokens', '-n', min=1, help='Output tokens per model call (default: a quarter of the context window, 512 to 4096)'),
     mode: str = typer.Option('read-only', '--mode'),
     resume: str = typer.Option(None, '--resume'),
     max_steps: int = typer.Option(30, min=1),
@@ -322,7 +322,7 @@ def chat(
 @app.command()
 def edit(
     prompt: str = typer.Argument(...),
-    max_tokens: int = typer.Option(2048, '--max-tokens', '-n', min=1),
+    max_tokens: int = typer.Option(None, '--max-tokens', '-n', min=1, help='Output tokens per model call (default: a quarter of the context window, 512 to 4096)'),
     mode: str = typer.Option('workspace-edit', '--mode'),
     max_steps: int = typer.Option(30, min=1),
     max_seconds: float = typer.Option(300, min=1),
