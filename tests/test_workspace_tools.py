@@ -84,7 +84,57 @@ def test_read_edit_write_and_real_command(tmp_path):
 
 def test_registered_tools_are_the_minimal_set(tmp_path):
     tools = WorkspaceTools(tmp_path, mode='execute')
-    assert tools.tool_names == {'read', 'write', 'edit', 'bash', 'web_search', 'web_fetch'}
+    assert tools.tool_names == {'read', 'list', 'search', 'write', 'edit', 'bash', 'web_search', 'web_fetch'}
+    tools.close()
+
+
+@pytest.mark.parametrize('mode', ['read-only', 'workspace-edit'])
+def test_list_and_search_work_without_execute_mode(tmp_path, mode):
+    (tmp_path / 'pkg').mkdir()
+    (tmp_path / 'pkg' / 'core.py').write_text('def add(a, b):\n    return a + b\n')
+    (tmp_path / 'README.md').write_text('Call add() to sum.\n')
+    (tmp_path / 'node_modules').mkdir()
+    (tmp_path / 'node_modules' / 'dep.py').write_text('def add(): pass\n')
+    (tmp_path / 'blob.bin').write_bytes(b'add\0\x01')
+    tools = WorkspaceTools(tmp_path, mode=mode)
+    assert {'list', 'search'} <= {s['function']['name'] for s in tools.selected_schemas('auto')}
+    assert tools.call_tool('list', {}).splitlines() == ['README.md', 'blob.bin', 'pkg/core.py']
+    assert tools.call_tool('list', {'pattern': '**/*.py'}) == 'pkg/core.py'
+    assert tools.call_tool('list', {'path': 'pkg'}) == 'pkg/core.py'
+    assert tools.call_tool('list', {'max_entries': 1}).splitlines() == ['README.md', '[2 more files not shown; narrow path or pattern]']
+    assert tools.call_tool('search', {'pattern': r'def add'}) == 'pkg/core.py:1: def add(a, b):'
+    assert tools.call_tool('search', {'pattern': 'CALL', 'case_sensitive': False}) == 'README.md:1: Call add() to sum.'
+    assert tools.call_tool('search', {'pattern': 'add', 'glob': '*.md'}) == 'README.md:1: Call add() to sum.'
+    assert tools.call_tool('search', {'pattern': 'nothing here'}) == '(no matches)'
+    assert tools.execute_tool('search', {'pattern': '('}).error_code == 'invalid_request'
+    assert tools.execute_tool('list', {'path': 'missing'}).error_code == 'not_found'
+    assert tools.execute_tool('list', {'path': '..'}).error_code == 'invalid_request'
+    tools.close()
+
+
+def test_list_respects_gitignore_and_skips_escaping_symlinks(tmp_path):
+    import shutil, subprocess
+    if not shutil.which('git'):
+        pytest.skip('git is not installed')
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    (tmp_path / '.gitignore').write_text('build/\n')
+    (tmp_path / 'build').mkdir()
+    (tmp_path / 'build' / 'out.py').write_text('x = 1\n')
+    (tmp_path / 'src.py').write_text('x = 1\n')
+    outside = tmp_path.parent / f'{tmp_path.name}-outside.txt'
+    outside.write_text('x = 1\n')
+    (tmp_path / 'link.txt').symlink_to(outside)
+    tools = WorkspaceTools(tmp_path)
+    assert tools.call_tool('list', {}).splitlines() == ['.gitignore', 'src.py']
+    assert tools.call_tool('search', {'pattern': 'x = 1'}) == 'src.py:1: x = 1'
+    tools.close()
+
+
+def test_search_limits_results(tmp_path):
+    (tmp_path / 'a.txt').write_text('hit\n' * 5)
+    tools = WorkspaceTools(tmp_path)
+    lines = tools.call_tool('search', {'pattern': 'hit', 'max_results': 2}).splitlines()
+    assert lines == ['a.txt:1: hit', 'a.txt:2: hit', '[more matches not shown; narrow pattern, path, or glob]']
     tools.close()
 
 

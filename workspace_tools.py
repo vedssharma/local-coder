@@ -11,6 +11,8 @@ import time
 import uuid
 import web_tools
 import errno
+import fnmatch
+import re
 from tool_result import ToolResult
 from tool_registry import ToolRegistry, ToolSpec, MODES
 from jsonschema import ValidationError
@@ -25,6 +27,10 @@ def schema(name, description, properties, required=()):
 
 STRING = {'type': 'string'}
 INTEGER = {'type': 'integer', 'minimum': 1}
+# Never listed or searched: harness state, VCS internals, and dependency/build caches.
+SKIPPED_DIRS = {'.git', '.local-coder', '__pycache__', 'node_modules', '.venv', 'venv', '.mypy_cache',
+                '.pytest_cache', '.ruff_cache', '.tox'}
+MAX_SEARCH_FILE_BYTES = 1_000_000
 
 class PatchConflict(ValueError):
     pass
@@ -68,6 +74,22 @@ class WorkspaceTools:
         self.registry.register(ToolSpec(
             schema('read', 'Read a bounded line range of a workspace file.',
            {'path': STRING, 'start_line': INTEGER, 'end_line': INTEGER}, ['path']), self._tool_read,
+            minimum_mode='read-only', side_effects='none', concurrency='parallel',
+            retry_safe=True, cacheable=True, compact_observation=True, task_kinds=('inspect', 'code', 'all')))
+
+        self.registry.register(ToolSpec(
+            schema('list', 'List workspace files under a directory, optionally filtered by a glob such as **/*.py. '
+           'Respects .gitignore in Git repositories.',
+           {'path': STRING, 'pattern': {'type': 'string', 'minLength': 1},
+            'max_entries': {'type': 'integer', 'minimum': 1, 'maximum': 1000}}), self._tool_list,
+            minimum_mode='read-only', side_effects='none', concurrency='parallel',
+            retry_safe=True, cacheable=True, compact_observation=True, task_kinds=('inspect', 'code', 'all')))
+
+        self.registry.register(ToolSpec(
+            schema('search', 'Search workspace file contents with a regular expression. Returns path:line: text matches.',
+           {'pattern': {'type': 'string', 'minLength': 1}, 'path': STRING,
+            'glob': {'type': 'string', 'minLength': 1}, 'case_sensitive': {'type': 'boolean'},
+            'max_results': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['pattern']), self._tool_search,
             minimum_mode='read-only', side_effects='none', concurrency='parallel',
             retry_safe=True, cacheable=True, compact_observation=True, task_kinds=('inspect', 'code', 'all')))
 
@@ -182,6 +204,98 @@ class WorkspaceTools:
         instructions = repository_instructions(self.root, p, include_root=False)
         result = ''.join(lines)[:32000] or '(empty file)'
         return result + ('\n\n' + instructions if instructions else '')
+
+    def _files(self, base):
+        """Workspace files under base, sorted and relative to the root, excluding ignored paths."""
+        if base.is_file():
+            return [base.relative_to(self.root).as_posix()]
+        if not base.is_dir():
+            raise FileNotFoundError(f'No such file or directory: {base.relative_to(self.root).as_posix()}')
+        names = self._git_files(base)
+        if names is None:
+            names = []
+            for directory, dirs, files in os.walk(base):
+                dirs[:] = sorted(d for d in dirs if d not in SKIPPED_DIRS)
+                names.extend((Path(directory) / f).relative_to(self.root).as_posix() for f in files)
+        context = CURRENT_CONTEXT.get()
+        result = []
+        for name in sorted(names):
+            if context:
+                context.check()
+            if any(part in SKIPPED_DIRS for part in Path(name).parts):
+                continue
+            p = self.root / name
+            # Symlinks that resolve outside the workspace are not listed.
+            if p.is_file() and p.resolve().is_relative_to(self.root):
+                result.append(name)
+        return result
+
+    def _git_files(self, base):
+        git = shutil.which('git')
+        if not git or not (self.root / '.git').exists():
+            return None
+        try:
+            done = subprocess.run([git, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.'],
+                                  cwd=base, stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if done.returncode != 0:
+            return None
+        prefix = base.relative_to(self.root)
+        return [(prefix / name).as_posix() for name in done.stdout.decode(errors='replace').split('\0') if name]
+
+    @staticmethod
+    def _matches(name, pattern):
+        # fnmatch's * already crosses '/', so **/ also matches top-level files.
+        return fnmatch.fnmatchcase(name, pattern) or (pattern.startswith('**/') and fnmatch.fnmatchcase(name, pattern[3:])) \
+            or ('/' not in pattern and fnmatch.fnmatchcase(name.rsplit('/', 1)[-1], pattern))
+
+    def _tool_list(self, args):
+        base = self.path(args.get('path', '.'))
+        limit = args.get('max_entries', 200)
+        names = self._files(base)
+        if 'pattern' in args:
+            names = [n for n in names if self._matches(n, args['pattern'])]
+        shown = names[:limit]
+        text = '\n'.join(shown) or '(no files)'
+        if len(names) > limit:
+            text += f'\n[{len(names) - limit} more files not shown; narrow path or pattern]'
+        return text
+
+    def _tool_search(self, args):
+        try:
+            regex = re.compile(args['pattern'], 0 if args.get('case_sensitive', True) else re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f'Invalid regular expression: {exc}') from exc
+        limit = args.get('max_results', 50)
+        matches, more = [], False
+        context = CURRENT_CONTEXT.get()
+        for name in self._files(self.path(args.get('path', '.'))):
+            if 'glob' in args and not self._matches(name, args['glob']):
+                continue
+            p = self.root / name
+            try:
+                if p.stat().st_size > MAX_SEARCH_FILE_BYTES:
+                    continue
+                raw = p.read_bytes()
+            except OSError:
+                continue
+            if b'\0' in raw[:8192]:
+                continue  # Binary file.
+            if context:
+                context.check()
+            for n, line in enumerate(raw.decode(errors='replace').splitlines(), 1):
+                if regex.search(line):
+                    if len(matches) == limit:
+                        more = True
+                        break
+                    matches.append(f'{name}:{n}: {line.strip()[:300]}')
+            if more:
+                break
+        text = '\n'.join(matches) or '(no matches)'
+        if more:
+            text += '\n[more matches not shown; narrow pattern, path, or glob]'
+        return text
 
     def _tool_write(self, args):
         with self._write_lock:

@@ -67,12 +67,14 @@ python main.py edit "Fix the failing tests and verify the changes" --mode execut
 python main.py chat --mode execute --max-steps 60 --max-seconds 600 --token-budget 16384
 ```
 
-The model has exactly six tools:
+The model has eight tools:
 
 - `read`: a line range of a workspace file (default 100 lines).
+- `list` (all modes): workspace file paths under a directory, optionally filtered by a glob such as `**/*.py` (default 200 entries, at most 1,000). In a Git repository it respects `.gitignore`; `.git`, `.local-coder`, `node_modules`, virtual environments, and caches are always skipped, as are symlinks that resolve outside the workspace.
+- `search` (all modes): a regular-expression search of file contents, returning `path:line: text` matches (default 50, at most 200). Optional `path`, filename `glob`, and `case_sensitive`. It skips the same paths as `list`, binary files, and files over 1 MB.
 - `write`: create a file or overwrite it entirely (`workspace-edit` mode or higher).
 - `edit`: replace exactly one matching block of text in an existing file (`workspace-edit` mode or higher).
-- `bash` (`execute` mode): run a non-interactive Bash command, including pipes, redirects, and multiline scripts, and wait for it to finish. Use it for listing, searching (`ls`, `rg`), `git diff`, and running checks. It returns combined stdout/stderr and the exit status. The timeout is 1–300 seconds (default 60) and the optional `cwd` must resolve inside the workspace. Output retains at most 32,000 bytes and reports truncation. Bash must be installed on PATH; it runs without profile or rc files, with stdin closed. Each call starts a fresh shell; variables and working-directory changes do not persist between calls. `bash` runs with host privileges and the command body is not filesystem-sandboxed. The runtime terminates any remaining command processes when it closes.
+- `bash` (`execute` mode): run a non-interactive Bash command, including pipes, redirects, and multiline scripts, and wait for it to finish. Use it for `git diff`, running checks, and anything `list` and `search` don't cover. It returns combined stdout/stderr and the exit status. The timeout is 1–300 seconds (default 60) and the optional `cwd` must resolve inside the workspace. Output retains at most 32,000 bytes and reports truncation. Bash must be installed on PATH; it runs without profile or rc files, with stdin closed. Each call starts a fresh shell; variables and working-directory changes do not persist between calls. `bash` runs with host privileges and the command body is not filesystem-sandboxed. The runtime terminates any remaining command processes when it closes.
 - `web_search` and `web_fetch`: see below.
 
 For example, the agent can call `bash` with `{"command": "python -m pytest -q", "cwd": ".", "timeout_seconds": 120}`. Repository instructions and tool output cannot elevate the selected mode.
@@ -173,7 +175,7 @@ Thread, batch, attention, and KV-cache options apply to embedded inference. KV t
 
 Reports retain individual samples and medians for request latency, load time, first streamed output, and available native prompt/generation throughput. Unsupported rates remain null; server end-to-end latency is not mislabeled as decode speed. A warm-up excludes model loading from the sampled steady-state requests; use `--warmups 0` to include a cold first request. Run results also contain total, context preparation, model, and tool timings and call counts. Real benchmarks require a configured model.
 
-`--task-kind auto` exposes inspection tools (`read`, `web_search`, `web_fetch`) in read-only mode and all permitted tools in edit/execute modes. Use `answer` for a tool-free question, `inspect` for reads and web lookups, `code` for permitted coding tools, or `all`. Selection narrows capabilities; it never grants permissions. Default reads return 100 lines, `@file` preloads are bounded to 8 KB, and unchanged preloads already retained in the transcript are not injected twice. Changed files and references whose old context was compacted away are injected again.
+`--task-kind auto` exposes inspection tools (`read`, `list`, `search`, `web_search`, `web_fetch`) in read-only mode and all permitted tools in edit/execute modes. Use `answer` for a tool-free question, `inspect` for reads and web lookups, `code` for permitted coding tools, or `all`. Selection narrows capabilities; it never grants permissions. Default reads return 100 lines, `@file` preloads are bounded to 8 KB, and unchanged preloads already retained in the transcript are not injected twice. Changed files and references whose old context was compacted away are injected again.
 
 Duplicate reads within one model response share an execution. Reads across steps execute again to detect changes, but identical retained observations are referenced instead of appended in full. Errors and command results are never reused.
 
