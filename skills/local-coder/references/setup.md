@@ -1,6 +1,6 @@
 # MCP setup
 
-Install Local Coder's Python requirements and ripgrep. Configure a GGUF model or an OpenAI-compatible local server using `python main.py models`. Node is not required for the native coding tools.
+Install Local Coder's Python requirements (`requirements.txt`, plus `requirements-embedded.txt` for in-process GGUF models) and ripgrep. Configure a GGUF model or an OpenAI-compatible local server using `python main.py models`. Node is not required for the native coding tools.
 
 Use your host's supported stdio MCP configuration format. The essential fields are:
 

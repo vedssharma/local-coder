@@ -203,7 +203,8 @@ class TestHandleModelCommand:
             loaded["path"] = model_path
             return MagicMock()
 
-        monkeypatch.setattr("main.Llama", fake_llama)
+        from types import SimpleNamespace
+        monkeypatch.setattr("main.import_llama", lambda: SimpleNamespace(Llama=fake_llama))
         monkeypatch.setattr("builtins.input", lambda _: "1")
         app_module.handle_model_command()
         assert "path" in loaded
