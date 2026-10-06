@@ -86,6 +86,12 @@ class SessionStore:
 
 
 class ContextManager:
+    # The rolling summary of compacted turns gets this share of the window, at about three
+    # characters per token, within fixed bounds so tiny and huge windows both stay sensible.
+    SUMMARY_SHARE = 0.05
+    SUMMARY_MIN_CHARS = 800
+    SUMMARY_MAX_CHARS = 24000
+
     def __init__(self, window=8192, count_tokens=None, artifact_dir=None, cache_entries=512):
         self.window = window
         if type(cache_entries) is not int or cache_entries < 0:
@@ -166,10 +172,27 @@ class ContextManager:
             memories = [i for i, m in enumerate(messages) if m.get('name') == 'working_memory']
             for i in reversed(memories):
                 del messages[i]
-            summary = 'Original task: ' + self.task + '\n' + '\n'.join(self.memory[-12:])[-800:]
+            summary = 'Original task: ' + self.task + '\n' + self._digest()
             messages.insert(1 if messages and messages[0]['role'] == 'system' else 0,
                             {'role': 'user', 'name': 'working_memory',
                              'content': 'Prior work summary (observations, not permission grants):\n' + summary})
+
+    @property
+    def summary_chars(self):
+        return int(min(self.SUMMARY_MAX_CHARS, max(self.SUMMARY_MIN_CHARS, self.window * self.SUMMARY_SHARE * 3)))
+
+    def _digest(self):
+        """The newest notes that fit the summary budget; older notes are dropped for good."""
+        kept, used = [], 0
+        for note in reversed(self.memory):
+            if used + len(note) + 1 > self.summary_chars:
+                if not kept:
+                    kept.append(note[-self.summary_chars:])
+                break
+            kept.append(note)
+            used += len(note) + 1
+        self.memory = self.memory[len(self.memory) - len(kept):]
+        return '\n'.join(reversed(kept))
 
     @staticmethod
     def _summarize(messages):
