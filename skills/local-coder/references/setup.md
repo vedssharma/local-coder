@@ -29,6 +29,8 @@ Coding tools accept an optional `profile` naming an existing saved model configu
 
 `web_search` and `web_fetch` follow the model profile's web setting: off for embedded and local-server models, on for hosted providers, changed with `python main.py models --web` or `--no-web`. Set `LOCAL_CODER_WEB=1` or `0` at launch to override it for this server.
 
+Each coding call runs with the CLI's budget: 30 steps, 300 seconds and 8,192 generated tokens. Set `LOCAL_CODER_MAX_STEPS`, `LOCAL_CODER_MAX_SECONDS` or `LOCAL_CODER_TOKEN_BUDGET` at launch to change them.
+
 `LOCAL_CODER_TOOL_WORKERS` controls independent read concurrency (default 4, range 1–8); mutations and unknown tools stay serial.
 
 Coding results also expose `changed_files`, `checks`, `outstanding_processes`, `verification_status`, and `verification_scope`. Model completion and observed verification are distinct. Failed/stale checks, running jobs, and uncertain interrupted effects prevent a successful completion result. Checks marked `verification=true` preserve their actual exit status; no observed check means `not_run`.

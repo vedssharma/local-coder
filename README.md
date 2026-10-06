@@ -140,7 +140,7 @@ cd /path/to/your/project
 /path/to/local-coder/llm/bin/python /path/to/local-coder/skills/local-coder/scripts/server.py
 ```
 
-It exposes `ask`, `chat`, `edit`, `get_model`, and `set_model` over stdio. Responses from coding tools include `status`, `text`, budgets consumed, and `session_id`. The server defaults to read-only. Set `LOCAL_CODER_PERMISSION_MODE=workspace-edit` or `execute` at launch to enable those capabilities. MCP arguments cannot grant permissions. See the [setup guide](skills/local-coder/references/setup.md).
+It exposes `ask`, `chat`, `edit`, `get_model`, and `set_model` over stdio. Responses from coding tools include `status`, `text`, budgets consumed, and `session_id`. The server defaults to read-only. Set `LOCAL_CODER_PERMISSION_MODE=workspace-edit` or `execute` at launch to enable those capabilities. MCP arguments cannot grant permissions. Each call gets the CLI's run budget (30 steps, 300 seconds, 8,192 generated tokens); set `LOCAL_CODER_MAX_STEPS`, `LOCAL_CODER_MAX_SECONDS` or `LOCAL_CODER_TOKEN_BUDGET` at launch to change it. See the [setup guide](skills/local-coder/references/setup.md).
 
 ## Evaluate changes
 
