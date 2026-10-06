@@ -56,10 +56,7 @@ def save_key(provider, key):
     config.ensure_config_dir()
     keys = _load_keys()
     keys[provider] = key
-    fd = os.open(keys_file(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as f:
-        json.dump(keys, f)
-    os.chmod(keys_file(), 0o600)
+    config.write_json_atomic(keys_file(), keys, mode=0o600)
 
 
 def resolve_key(profile):
