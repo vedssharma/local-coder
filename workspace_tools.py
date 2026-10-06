@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 import web_tools
+import difflib
 import errno
 import fnmatch
 import re
@@ -34,6 +35,124 @@ MAX_SEARCH_FILE_BYTES = 1_000_000
 
 class PatchConflict(ValueError):
     pass
+
+
+def _line_of(text, offset):
+    return text.count('\n', 0, offset) + 1
+
+
+def _numbered(lines, first):
+    return '\n'.join(f'{first + i:>5}| {line}' for i, line in enumerate(lines))
+
+
+def _reindent(file_lines, old_lines):
+    """The uniform indentation change that turns old_lines into file_lines, ignoring trailing
+    whitespace: ('add', prefix), ('remove', prefix), or None when the lines differ otherwise."""
+    change = None
+    for actual, expected in zip(file_lines, old_lines):
+        if not actual.strip() and not expected.strip():
+            continue
+        if actual.strip() != expected.strip():
+            return None
+        actual_lead = actual[:len(actual) - len(actual.lstrip())]
+        expected_lead = expected[:len(expected) - len(expected.lstrip())]
+        if actual_lead.endswith(expected_lead):
+            candidate = ('add', actual_lead[:len(actual_lead) - len(expected_lead)])
+        elif expected_lead.endswith(actual_lead):
+            candidate = ('remove', expected_lead[:len(expected_lead) - len(actual_lead)])
+        else:
+            return None
+        if candidate[1] == '':
+            candidate = ('add', '')
+        if change is None:
+            change = candidate
+        elif change != candidate:
+            return None
+    return change or ('add', '')
+
+
+def edit_text(original, old, new, start_line=None):
+    """Apply one edit, returning (updated text, note) or raising PatchConflict with what was found.
+
+    An exact unique match is used as is. Several exact matches need start_line. With no exact match,
+    a unique match that differs only in trailing whitespace or a uniform indentation shift is used,
+    and new_text gets the same indentation shift. Otherwise the error shows the closest block."""
+    count = original.count(old)
+    if count == 1:
+        return original.replace(old, new, 1), None
+    if count > 1:
+        offsets, start = [], original.find(old)
+        while start != -1:
+            offsets.append(start)
+            start = original.find(old, start + 1)
+        lines = [_line_of(original, offset) for offset in offsets]
+        if start_line in lines:
+            offset = offsets[lines.index(start_line)]
+            return original[:offset] + new + original[offset + len(old):], None
+        shown = ', '.join(map(str, lines[:20])) + (', ...' if len(lines) > 20 else '')
+        hint = f'start_line {start_line} is not one of them. ' if start_line else ''
+        raise PatchConflict(f'old_text matches {len(lines)} times, starting at lines {shown}. {hint}'
+                            'Pass start_line to pick one, or include more surrounding text.')
+    file_lines = original.splitlines(keepends=True)
+    bare_file = [line.rstrip('\r\n') for line in file_lines]
+    old_lines = old.rstrip('\n').split('\n')
+    width = len(old_lines)
+    matches = []
+    for index in range(len(bare_file) - width + 1):
+        change = _reindent(bare_file[index:index + width], old_lines)
+        if change is not None:
+            matches.append((index, change))
+            if len(matches) > 1:
+                break
+    if len(matches) == 1:
+        index, (direction, prefix) = matches[0]
+        replacement = []
+        for line in new.split('\n'):
+            if not line.strip() or not prefix:
+                replacement.append(line)
+            elif direction == 'add':
+                replacement.append(prefix + line)
+            elif line.startswith(prefix):
+                replacement.append(line[len(prefix):])
+            else:
+                break
+        else:
+            region = ''.join(file_lines[index:index + width])
+            text = ('\r\n' if region.endswith('\r\n') else '\n').join(replacement)
+            if region.endswith('\n') and not text.endswith('\n'):
+                text += '\r\n' if region.endswith('\r\n') else '\n'
+            note = 'matched ignoring whitespace differences'
+            if prefix:
+                note += f'; {"added" if direction == "add" else "removed"} {len(prefix)} characters of indentation in new_text'
+            prefix_length = sum(len(line) for line in file_lines[:index])
+            return original[:prefix_length] + text + original[prefix_length + len(region):], f'{note}, lines {index + 1}-{index + width}'
+    if len(matches) > 1:
+        raise PatchConflict('old_text is not in the file exactly; it matches several places when whitespace is '
+                            'ignored. Reread the file and copy the exact text.')
+    raise PatchConflict(_closest_block(bare_file, old_lines))
+
+
+def _closest_block(file_lines, old_lines):
+    message = 'old_text was not found in the file.'
+    anchor = next((line.strip() for line in old_lines if line.strip()), '')
+    if not anchor or not file_lines:
+        return message + ' Reread the file.'
+    # Candidate blocks start where a line resembles old_text's first nonblank line.
+    offset = next(i for i, line in enumerate(old_lines) if line.strip())
+    starts = sorted({max(0, i - offset) for i, line in enumerate(file_lines)
+                     if difflib.SequenceMatcher(None, anchor, line.strip()).quick_ratio() >= 0.6})
+    best, best_ratio = None, 0.0
+    target = '\n'.join(line.strip() for line in old_lines)
+    for start in starts[:200]:
+        window = file_lines[start:start + len(old_lines)]
+        ratio = difflib.SequenceMatcher(None, target, '\n'.join(line.strip() for line in window)).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = start, ratio
+    if best is None or best_ratio < 0.5:
+        return message + ' Nothing similar was found; reread the file.'
+    shown = file_lines[best:best + min(len(old_lines), 30)]
+    return (f'{message} Closest block ({best_ratio:.0%} similar), lines {best + 1}-{best + len(shown)}; '
+            f'copy it exactly as old_text:\n{_numbered(shown, best + 1)}')
 
 
 class WorkspaceTools:
@@ -101,8 +220,10 @@ class WorkspaceTools:
             task_kinds=('code', 'all')))
 
         self.registry.register(ToolSpec(
-            schema('edit', 'Replace exactly one matching text block in an existing file.',
-           {'path': STRING, 'old_text': {'type': 'string', 'minLength': 1}, 'new_text': STRING},
+            schema('edit', 'Replace exactly one matching text block in an existing file. If old_text appears more than '
+           'once, pass start_line (the 1-based line where the intended match starts).',
+           {'path': STRING, 'old_text': {'type': 'string', 'minLength': 1}, 'new_text': STRING,
+            'start_line': {'type': 'integer', 'minimum': 1}},
            ['path', 'old_text', 'new_text']), self._tool_edit,
             minimum_mode='workspace-edit', side_effects='filesystem', concurrency='serial',
             task_kinds=('code', 'all')))
@@ -316,12 +437,13 @@ class WorkspaceTools:
             p = self.path(args['path'])
             old, new = args['old_text'], args['new_text']
             original = p.read_text()
-            if original.count(old) != 1:
-                raise PatchConflict('Expected text must match exactly once; reread the file')
-            updated = original.replace(old, new, 1)
+            updated, note = edit_text(original, old, new, args.get('start_line'))
             mode = p.stat().st_mode
             self._replace(p, original, updated, mode)
-            return self._patched(p, original, updated, mode, 'Edited')
+            result = self._patched(p, original, updated, mode, 'Edited')
+            if note:
+                result.data += f' ({note})'
+            return result
 
     def _replace(self, p, expected, updated, mode):
         """Atomic replacement that refuses to clobber a concurrent change."""
