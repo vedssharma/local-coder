@@ -287,7 +287,7 @@ def chat(
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
     web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch for this run (default: the profile setting)'),
 ):
-    """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /exit."""
+    """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /undo turn, /exit."""
     console = Console()
     with make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent, profile_name, route, tool_workers, web) as runtime:
         if resume:
@@ -305,6 +305,8 @@ def chat(
                     runtime.new()
                 elif prompt == '/undo':
                     typer.echo(runtime.tools.undo_last())
+                elif prompt == '/undo turn':
+                    typer.echo(runtime.tools.undo_turn())
                 elif prompt == '/acknowledge-interrupted':
                     runtime.acknowledge_interrupted()
                     typer.echo('Interrupted operations acknowledged; completed calls will not be replayed.')
@@ -347,10 +349,11 @@ def edit(
 
 
 @app.command()
-def undo():
-    """Undo the most recent harness patch if the file has not changed since."""
+def undo(turn: bool = typer.Option(False, '--turn', help='Undo every patch from the most recent turn')):
+    """Undo the most recent harness patch, or the whole last turn, if the files have not changed since."""
     try:
-        typer.echo(WorkspaceTools(mode='workspace-edit').undo_last())
+        tools = WorkspaceTools(mode='workspace-edit')
+        typer.echo(tools.undo_turn() if turn else tools.undo_last())
     except (OSError, ValueError) as exc:
         typer.echo(f'Cannot undo: {exc}', err=True)
         raise typer.Exit(1)

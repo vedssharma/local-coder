@@ -1,5 +1,6 @@
 """UI-independent sessions, model execution, events, and cleanup."""
 from dataclasses import asdict
+import uuid
 import json
 from pathlib import Path
 import threading
@@ -118,6 +119,7 @@ class Runtime:
             raise ValueError('max_tokens must be positive')
         self.max_tokens = max_tokens
         self.cancel_event.clear()
+        self.tools.turn_id = uuid.uuid4().hex
         history = [m for m in self.messages if m.get('role') != 'system' or m.get('name') == 'working_memory']
         file_contents = file_contents or {}
         fresh, reused = {}, []

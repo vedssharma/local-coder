@@ -124,7 +124,7 @@ python main.py chat --resume SESSION_ID
 python main.py undo
 ```
 
-Chat commands: `/sessions`, `/resume ID`, `/new`, `/undo`, `/model`, `/md`, and `/exit`. Undo restores only the latest recorded harness patch whose current contents still match the patch result. It preserves pre-existing user edits and refuses to overwrite subsequent changes. Arbitrary command edits are not automatically undoable.
+Chat commands: `/sessions`, `/resume ID`, `/new`, `/undo`, `/undo turn`, `/model`, `/md`, and `/exit`. Undo restores only the latest recorded harness patch whose current contents still match the patch result. `/undo turn` (or `python main.py undo --turn`) reverts every patch from the most recent turn, newest first, and changes nothing if any of those files changed since. It preserves pre-existing user edits and refuses to overwrite subsequent changes. Arbitrary command edits are not automatically undoable.
 
 Context budgeting counts tools, transcript, framing, and reserved generation space. Embedded inference uses its tokenizer; server inference conservatively estimates from UTF-8 bytes. Complete older turns are compacted into a summary of requests, decisions, tool use, and observations. The summary gets about 5% of the context window (between 800 and 24,000 characters), keeping the newest notes that fit. Summaries are lossy. The active turn is preserved; if it cannot fit, the run blocks instead of silently discarding it. Large tool results are shortened, with retained output artifacts under `.local-coder/artifacts` where applicable. Command output retains the latest 32 KB.
 

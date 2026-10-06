@@ -162,6 +162,8 @@ class WorkspaceTools:
         if mode not in MODES:
             raise ValueError('Unknown permission mode')
         self.mode = mode
+        # Patches recorded while a turn id is set can be undone together with undo_turn().
+        self.turn_id = None
         self.processes = {}
         self._write_lock = threading.RLock()
         self.registry = ToolRegistry()
@@ -479,41 +481,79 @@ class WorkspaceTools:
     def _record_patch(self, path, before, after, mode):
         directory = self.path('.local-coder/undo')
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        record = {'path': str(path.relative_to(self.root)), 'before': before, 'after': after, 'mode': mode}
+        record = {'path': str(path.relative_to(self.root)), 'before': before, 'after': after, 'mode': mode,
+                  'turn': self.turn_id}
         key = f'{time.time_ns()}-{uuid.uuid4().hex}.json'
         with (directory / key).open('x') as f:
             os.chmod(f.name, 0o600)
             json.dump(record, f)
 
-    def undo_last(self):
+    def _undo_records(self):
         if self.mode == 'read-only':
             raise PermissionError('Undo requires workspace-edit or execute mode')
-        records = sorted(self.path('.local-coder/undo').glob('*.json'))
+        records = []
+        for record_path in sorted(self.path('.local-coder/undo').glob('*.json')):
+            if record_path.is_symlink():
+                raise ValueError('Invalid undo record')
+            records.append((record_path, json.loads(record_path.read_text())))
+        return records
+
+    def undo_last(self):
+        records = self._undo_records()
         if not records:
             return 'No harness edits to undo.'
-        record_path = records[-1]
-        if record_path.is_symlink():
-            raise ValueError('Invalid undo record')
-        record = json.loads(record_path.read_text())
-        self.authorize('edit', {'path': record['path']})
-        path = self.path(record['path'])
-        if not path.exists() or path.read_text() != record['after']:
-            raise ValueError('File changed since the harness edit; undo refused to preserve your changes')
-        if record['before'] is None:
-            path.unlink()
+        self._undo(records[-1:])
+        return f'Undid harness edit to {records[-1][1]["path"]}'
+
+    def undo_turn(self):
+        """Undo every patch from the most recent turn, newest first, or nothing if any file changed since."""
+        records = self._undo_records()
+        if not records:
+            return 'No harness edits to undo.'
+        turn = records[-1][1].get('turn')
+        if turn is None:
+            selected = records[-1:]
         else:
-            with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as f:
-                temp = Path(f.name)
-                f.write(record['before'])
-            try:
-                temp.chmod(record['mode'])
-                if path.read_text() != record['after']:
-                    raise ValueError('File changed during undo')
-                temp.replace(path)
-            finally:
-                temp.unlink(missing_ok=True)
-        record_path.unlink()
-        return f'Undid harness edit to {record["path"]}'
+            selected = []
+            for entry in reversed(records):
+                if entry[1].get('turn') != turn:
+                    break
+                selected.insert(0, entry)
+        self._undo(selected)
+        paths = sorted({record['path'] for _, record in selected})
+        return f'Undid {len(selected)} harness edit{"s" if len(selected) != 1 else ""} to {", ".join(paths)}'
+
+    def _undo(self, records):
+        # Check the whole chain before touching any file, so a refused undo changes nothing.
+        expected = {}
+        for _, record in reversed(records):
+            self.authorize('edit', {'path': record['path']})
+            path = self.path(record['path'])
+            if record['path'] not in expected:
+                current = path.read_text() if path.exists() else None
+                if current is None or current != record['after']:
+                    raise ValueError('File changed since the harness edit; undo refused to preserve your changes')
+            elif expected[record['path']] != record['after']:
+                raise ValueError('Undo records are inconsistent; undo refused')
+            expected[record['path']] = record['before']
+        for record_path, record in reversed(records):
+            path = self.path(record['path'])
+            if not path.exists() or path.read_text() != record['after']:
+                raise ValueError('File changed during undo')
+            if record['before'] is None:
+                path.unlink()
+            else:
+                with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as f:
+                    temp = Path(f.name)
+                    f.write(record['before'])
+                try:
+                    temp.chmod(record['mode'])
+                    if path.read_text() != record['after']:
+                        raise ValueError('File changed during undo')
+                    temp.replace(path)
+                finally:
+                    temp.unlink(missing_ok=True)
+            record_path.unlink()
 
     def _start(self, argv, cwd, timeout):
         if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
