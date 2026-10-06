@@ -1,3 +1,40 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-coder"
+version = "0.1.0"
+description = "A local-first coding harness with a terminal CLI and an MCP server"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer",
+    "rich",
+    "jsonschema",
+]
+
+[project.optional-dependencies]
+# Runs GGUF models in-process; needs a C/C++ build toolchain.
+embedded = ["llama-cpp-python>=0.3.35", "numpy"]
+# The MCP server, skills/local-coder/scripts/server.py.
+mcp = ["mcp>=1.30,<2"]
+dev = ["mcp>=1.30,<2", "numpy", "pytest==9.1.1", "ruff==0.16.8"]
+
+[project.scripts]
+local-coder = "main:app"
+
+[tool.setuptools]
+py-modules = [
+    "agent", "artifact_store", "checkpoint_recovery", "config", "execution_context", "helpers",
+    "inference_daemon", "main", "model_backend", "performance", "prompt_builder", "providers",
+    "runtime", "session", "speculative", "tool_recovery", "tool_registry", "tool_result",
+    "tool_scheduler", "verification", "web_tools", "workspace_tools",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
 target-version = "py310"
 

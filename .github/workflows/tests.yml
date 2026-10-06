@@ -24,14 +24,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: pyproject.toml
 
-      # The suite stubs llama-cpp-python (tests/conftest.py), so CI skips its
-      # native build from requirements-embedded.txt.
+      # The suite stubs llama-cpp-python (tests/conftest.py), so CI skips the
+      # native build in the embedded extra.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -e ".[dev]"
 
       - name: Run tests
         run: python -m pytest -q
@@ -48,7 +48,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Ruff
         run: |
-          pip install ruff==0.16.8
+          pip install -e ".[dev]"
           ruff check .

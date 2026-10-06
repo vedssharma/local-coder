@@ -11,21 +11,22 @@ Python 3.10+ is required. Node.js is not required.
 ```bash
 python -m venv llm
 source llm/bin/activate
-pip install -r requirements.txt
-pip install pytest pytest-asyncio
+pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-That is enough for hosted providers and OpenAI-compatible servers. To run GGUF models in-process, also install llama-cpp-python, which needs a C/C++ build toolchain:
+This installs a `local-coder` command (the same CLI as `python main.py`), the MCP server's dependency, and the pinned test tools. Use `pip install -e .` for the CLI alone, or `pip install -e ".[mcp]"` to also run the MCP server. That is enough for hosted providers and OpenAI-compatible servers. To run GGUF models in-process, also install the `embedded` extra, which builds llama-cpp-python and needs a C/C++ build toolchain:
 
 ```bash
-pip install -r requirements-embedded.txt
+pip install -e ".[embedded]"
 ```
+
+`requirements.txt` and `requirements-embedded.txt` remain for Docker and existing setups.
 
 For a CPU build when compiler environment variables point to unavailable tools:
 
 ```bash
-CC=gcc CXX=g++ CMAKE_BUILD_PARALLEL_LEVEL=2 pip install -r requirements-embedded.txt
+CC=gcc CXX=g++ CMAKE_BUILD_PARALLEL_LEVEL=2 pip install -e ".[embedded]"
 ```
 
 The test suite stubs llama-cpp-python, so it runs without the native build.
