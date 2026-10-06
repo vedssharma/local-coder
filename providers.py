@@ -124,3 +124,32 @@ def select_provider_interactively(ask=None, say=print, ask_secret=None):
         say('No API key provided; cancelled.')
         return None
     return profile
+
+
+def estimate_cost(profile, prompt_tokens, completion_tokens, cached_prompt_tokens=0):
+    """Estimated USD cost from the profile's price (USD per million tokens: input, output and
+    optionally cached_input, which defaults to the input price). None when no price is set."""
+    price = profile.get('price')
+    if not isinstance(price, dict) or price.get('input') is None or price.get('output') is None:
+        return None
+    cached = min(cached_prompt_tokens, prompt_tokens)
+    cached_price = price['input'] if price.get('cached_input') is None else price['cached_input']
+    return ((prompt_tokens - cached) * price['input'] + cached * cached_price
+            + completion_tokens * price['output']) / 1_000_000
+
+
+def describe_usage(profile, performance):
+    """One line of token usage and estimated cost for a turn, or None if the server reported no usage."""
+    if not performance.get('usage_reports'):
+        return None
+    prompt, cached = performance['prompt_tokens'], performance['cached_prompt_tokens']
+    line = f"Usage: {prompt:,} input tokens"
+    if cached:
+        line += f" ({cached:,} cached)"
+    line += f", {performance['completion_tokens']:,} output tokens"
+    cost = estimate_cost(profile, prompt, performance['completion_tokens'], cached)
+    if cost is not None:
+        line += f"; estimated ${cost:.4f}"
+    if performance['usage_reports'] < performance.get('model_calls', 0):
+        line += f" ({performance['usage_reports']} of {performance['model_calls']} model calls reported usage)"
+    return line

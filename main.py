@@ -232,11 +232,13 @@ def make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, tas
     if persistent:
         from inference_daemon import PersistentModel
         model = PersistentModel(selected, config.CONFIG_DIR)
-    return Runtime(model, os.getcwd(), config.CONFIG_DIR, mode=mode,
+    runtime = Runtime(model, os.getcwd(), config.CONFIG_DIR, mode=mode,
         emit=emit,
         budget=RunBudget(max_steps, max_seconds, token_budget),
         context_window=selected['n_ctx'], trace=trace, task_kind=task_kind,
         tool_workers=tool_workers, web=config.web_enabled(selected, web), retention=config.retention())
+    runtime.profile = selected
+    return runtime
 
 
 def format_sessions(summaries):
@@ -250,6 +252,12 @@ def format_sessions(summaries):
 def execute_turn(runtime, prompt, max_tokens):
     original, files = parse_file_references(prompt, root=runtime.tools.root)
     result = runtime.turn(original, files, max_tokens)
+    profile = getattr(runtime, 'profile', {})
+    if profile.get('provider') or profile.get('price'):
+        import providers
+        usage = providers.describe_usage(profile, result.performance)
+        if usage:
+            typer.echo(usage)
     typer.echo(f'Session: {runtime.session_id}; outcome: {result.status}')
     if result.status != 'completed':
         typer.echo(result.text)
@@ -411,6 +419,9 @@ def models(
     provider: str = typer.Option(None, '--provider', help='Hosted provider: ' + ', '.join(__import__('providers').PROVIDERS)),
     api_key: bool = typer.Option(False, '--api-key', help='Prompt for the provider API key (stored privately)'),
     web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch (default: on for hosted providers, off otherwise)'),
+    price_input: float = typer.Option(None, '--price-input', min=0, help='USD per million input tokens, for cost estimates'),
+    price_output: float = typer.Option(None, '--price-output', min=0, help='USD per million output tokens'),
+    price_cached: float = typer.Option(None, '--price-cached', min=0, help='USD per million cached input tokens (default: the input price)'),
 ):
     """Show current model or set a new model."""
     global llm
@@ -425,6 +436,12 @@ def models(
                'draft_tokens': draft_tokens, 'draft_ngram_size': draft_ngram_size,
                'draft_n_gpu_layers': draft_gpu_layers, 'web': web}
     updates = {k: v for k, v in updates.items() if v is not None}
+    prices = {k: v for k, v in {'input': price_input, 'output': price_output, 'cached_input': price_cached}.items()
+              if v is not None}
+    if prices:
+        updates['price'] = {**(config.get_model_config().get('price') or {}), **prices}
+    elif provider and provider != config.get_model_config().get('provider'):
+        updates['price'] = None  # Another provider's prices would be wrong.
     if provider:
         import providers
         if provider not in providers.PROVIDERS:
@@ -499,6 +516,10 @@ def models(
             typer.echo(f"  Model path: {model_path}")
         typer.echo(f"  Context size: {current_config['n_ctx']}")
         typer.echo(f"  Web tools: {'on' if config.web_enabled(current_config) else 'off'}")
+        price = current_config.get('price') or {}
+        if price.get('input') is not None and price.get('output') is not None:
+            typer.echo(f"  Price per million tokens: ${price['input']:g} input, ${price['output']:g} output"
+                       + (f", ${price['cached_input']:g} cached" if price.get('cached_input') is not None else ''))
         if current_config['backend'] != 'openai':
             typer.echo(f"  GPU layers: {current_config['n_gpu_layers']}")
             if os.path.exists(model_path):

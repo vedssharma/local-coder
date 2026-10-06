@@ -91,7 +91,8 @@ def run_agent(llm, messages, max_tokens=512, tools=None, budget=None,
 
     progress = ProgressTracker()
     observations = {}
-    metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0}
+    metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0,
+               'prompt_tokens': 0, 'completion_tokens': 0, 'cached_prompt_tokens': 0, 'usage_reports': 0}
 
     def finish(status, text, reason=''):
         result = RunResult(status, text, steps, generated, reason, {**metrics, 'total_seconds': time.monotonic() - started,
@@ -138,7 +139,8 @@ def run_agent(llm, messages, max_tokens=512, tools=None, budget=None,
             return finish('budget_exhausted', 'Run deadline exceeded.', 'deadline')
         except Exception as exc:
             return finish('blocked', f'Model request failed: {exc}', 'model_error')
-        usage = response.get('usage', {}).get('completion_tokens')
+        record_usage(metrics, response.get('usage'))
+        usage = (response.get('usage') or {}).get('completion_tokens')
         generated += usage if isinstance(usage, int) and usage >= 0 else max(1, context_manager.count_tokens(json.dumps(message)))
         if result := stopped(check_tokens=False):
             return result
@@ -235,7 +237,20 @@ def run_agent(llm, messages, max_tokens=512, tools=None, budget=None,
     return finish('budget_exhausted', 'Step budget exhausted; work may be incomplete.', 'step_limit')
 
 
-INLINE_TOOLS_MARKER = 'Tools you can call (this model has no native tool calling):'
+def record_usage(metrics, usage):
+    """Add a response's reported token usage to the run's totals; usage_reports counts the responses that had it."""
+    if not isinstance(usage, dict) or not isinstance(usage.get('prompt_tokens'), int):
+        return
+    metrics['usage_reports'] += 1
+    metrics['prompt_tokens'] += usage['prompt_tokens']
+    if isinstance(usage.get('completion_tokens'), int):
+        metrics['completion_tokens'] += usage['completion_tokens']
+    cached = (usage.get('prompt_tokens_details') or {}).get('cached_tokens')
+    if isinstance(cached, int):
+        metrics['cached_prompt_tokens'] += cached
+
+
+INLINE_TOOLS_MARKER ='Tools you can call (this model has no native tool calling):'
 
 
 def describe_inline_tools(messages, schemas):
