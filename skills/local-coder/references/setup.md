@@ -27,6 +27,8 @@ To smoke-test transport, connect an MCP client, initialize the session, list too
 
 Coding tools accept an optional `profile` naming an existing saved model configuration. The server keeps one model loaded at a time, releases it on profile changes, and uses that profile’s context limit. Profile selection never changes executor permissions.
 
+`web_search` and `web_fetch` follow the model profile's web setting: off for embedded and local-server models, on for hosted providers, changed with `python main.py models --web` or `--no-web`. Set `LOCAL_CODER_WEB=1` or `0` at launch to override it for this server.
+
 `LOCAL_CODER_TOOL_WORKERS` controls independent read concurrency (default 4, range 1–8); mutations and unknown tools stay serial.
 
 Coding results also expose `changed_files`, `checks`, `outstanding_processes`, `verification_status`, and `verification_scope`. Model completion and observed verification are distinct. Failed/stale checks, running jobs, and uncertain interrupted effects prevent a successful completion result. Checks marked `verification=true` preserve their actual exit status; no observed check means `not_run`.

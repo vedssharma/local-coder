@@ -19,13 +19,13 @@ from verification import VerificationLedger
 class Runtime:
     def __init__(self, model, workspace, state_dir, mode='read-only',
                  emit=None, budget=None, context_window=8192, trace=False, task_kind="auto",
-                 tool_workers=4):
+                 tool_workers=4, web=True):
         if type(tool_workers) is not int or not 1 <= tool_workers <= 8:
             raise ValueError('tool_workers must be between 1 and 8')
         self.tool_workers = tool_workers
         self._emit_lock = threading.RLock()
         self.model = model
-        self.tools = WorkspaceTools(workspace, mode=mode)
+        self.tools = WorkspaceTools(workspace, mode=mode, web=web)
         self.store = SessionStore(Path(state_dir) / 'sessions', workspace)
         self.context = ContextManager(context_window,
             count_tokens=model.count_tokens if isinstance(model, ModelAdapter) else None,
@@ -129,7 +129,7 @@ class Runtime:
                 fresh[name] = content
         if reused:
             prompt += '\nUnchanged file context retained earlier in this transcript: ' + ', '.join(reused)
-        self.messages = build_messages(prompt, fresh, history=history, root=self.tools.root)
+        self.messages = build_messages(prompt, fresh, history=history, root=self.tools.root, tools=self.tools.tool_names)
         self.session_id = self.store.save(self.messages, self.session_id,self.checkpoint)
         if isinstance(self.model, ModelAdapter):
             self.model.emit = self.emit

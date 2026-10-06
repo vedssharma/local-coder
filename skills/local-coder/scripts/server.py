@@ -24,6 +24,18 @@ _model_signature = None
 _lock = threading.RLock()
 
 
+def _env_flag(name):
+    """True/False from a 1/0 (or true/false) environment variable; None when it is unset."""
+    value = os.environ.get(name, '').strip().lower()
+    if not value:
+        return None
+    if value in ('1', 'true', 'yes', 'on'):
+        return True
+    if value in ('0', 'false', 'no', 'off'):
+        return False
+    raise ValueError(f'{name} must be 1 or 0')
+
+
 def get_model_instance(profile_name=None):
     global _model, _model_signature
     import json
@@ -43,7 +55,8 @@ def run_turn(prompt, files=None, session_id=None, max_tokens=None, profile_name=
         with Runtime(get_model_instance(profile_name), os.getcwd(), config.CONFIG_DIR,
                      mode=os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only'),
                      context_window=config.get_model_config(profile_name)['n_ctx'],
-                     tool_workers=int(os.environ.get('LOCAL_CODER_TOOL_WORKERS', '4'))) as runtime:
+                     tool_workers=int(os.environ.get('LOCAL_CODER_TOOL_WORKERS', '4')),
+                     web=config.web_enabled(config.get_model_config(profile_name), _env_flag('LOCAL_CODER_WEB'))) as runtime:
             if session_id:
                 runtime.resume(session_id)
             original, contents = parse_file_references(prompt, root=runtime.tools.root)

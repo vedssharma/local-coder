@@ -107,6 +107,16 @@ def resolve_model_config(data, name=None, task_kind=None, use_routes=False):
     return base
 
 
+def web_enabled(profile, override=None) -> bool:
+    """Whether web_search and web_fetch are offered. An explicit choice wins; otherwise they are on
+    only for hosted providers, which already send context off the machine."""
+    if override is not None:
+        return bool(override)
+    if profile.get('web') is not None:
+        return bool(profile['web'])
+    return bool(profile.get('provider'))
+
+
 def update_model_config(updates):
     data = load_config()
     selected = data.get('active_profile')

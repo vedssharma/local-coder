@@ -203,7 +203,7 @@ def handle_md_command(console, max_tokens):
         typer.echo("Write cancelled.\n")
 
 
-def make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, task_kind="auto", persistent=False, profile_name=None, route=False, tool_workers=4):
+def make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, task_kind="auto", persistent=False, profile_name=None, route=False, tool_workers=4, web=None):
     if mode not in MODES:
         raise typer.BadParameter('mode must be read-only, workspace-edit, or execute')
     streamed = False
@@ -236,7 +236,7 @@ def make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, tas
         emit=emit,
         budget=RunBudget(max_steps, max_seconds, token_budget),
         context_window=selected['n_ctx'], trace=trace, task_kind=task_kind,
-        tool_workers=tool_workers)
+        tool_workers=tool_workers, web=config.web_enabled(selected, web))
 
 
 def execute_turn(runtime, prompt, max_tokens):
@@ -262,9 +262,10 @@ def ask(
     profile_name: str = typer.Option(None, '--profile'),
     route: bool = typer.Option(False, '--route', help='Opt in to configured task-kind routing'),
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
+    web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch for this run (default: the profile setting)'),
 ):
     """Ask a question or run a bounded coding task."""
-    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, tool_workers) as runtime:
+    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, tool_workers, web) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
@@ -284,10 +285,11 @@ def chat(
     profile_name: str = typer.Option(None, '--profile'),
     route: bool = typer.Option(False, '--route', help='Opt in to configured task-kind routing'),
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
+    web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch for this run (default: the profile setting)'),
 ):
     """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /exit."""
     console = Console()
-    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent, profile_name, route, tool_workers) as runtime:
+    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent, profile_name, route, tool_workers, web) as runtime:
         if resume:
             runtime.resume(resume)
         while True:
@@ -335,9 +337,10 @@ def edit(
     profile_name: str = typer.Option(None, '--profile'),
     route: bool = typer.Option(False, '--route', help='Opt in to configured task-kind routing'),
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
+    web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch for this run (default: the profile setting)'),
 ):
     """Apply targeted edits; --mode execute also permits validation commands."""
-    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, tool_workers) as runtime:
+    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, tool_workers, web) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
@@ -379,6 +382,7 @@ def models(
     draft_gpu_layers: int = typer.Option(None, '--draft-gpu-layers', min=-1),
     provider: str = typer.Option(None, '--provider', help='Hosted provider: ' + ', '.join(__import__('providers').PROVIDERS)),
     api_key: bool = typer.Option(False, '--api-key', help='Prompt for the provider API key (stored privately)'),
+    web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch (default: on for hosted providers, off otherwise)'),
 ):
     """Show current model or set a new model."""
     global llm
@@ -391,7 +395,7 @@ def models(
                'prompt_cache_mb': prompt_cache_mb, 'server_cache_prompt': server_cache_prompt,
                'speculative_mode': speculative_mode, 'draft_model_path': draft_model_path,
                'draft_tokens': draft_tokens, 'draft_ngram_size': draft_ngram_size,
-               'draft_n_gpu_layers': draft_gpu_layers}
+               'draft_n_gpu_layers': draft_gpu_layers, 'web': web}
     updates = {k: v for k, v in updates.items() if v is not None}
     if provider:
         import providers
@@ -465,6 +469,7 @@ def models(
                            f"{'set' if providers.resolve_key(current_config) else 'missing'})")
         typer.echo(f"  Model path: {model_path}")
         typer.echo(f"  Context size: {current_config['n_ctx']}")
+        typer.echo(f"  Web tools: {'on' if config.web_enabled(current_config) else 'off'}")
         typer.echo(f"  GPU layers: {current_config['n_gpu_layers']}")
 
         # Check if model file exists
