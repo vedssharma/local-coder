@@ -113,7 +113,9 @@ class ContextManager:
         self.cache_hits = self.cache_misses = 0
 
     def _count(self, text):
-        key = hashlib.sha256(text.encode('utf-8')).digest()
+        # A counter whose estimate can change (a calibrated server adapter) exposes count_version.
+        version = getattr(getattr(self._counter, '__self__', None), 'count_version', 0)
+        key = (version, hashlib.sha256(text.encode('utf-8')).digest())
         if key in self._counts:
             self.cache_hits += 1
             self._counts.move_to_end(key)

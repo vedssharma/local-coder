@@ -13,9 +13,6 @@ import config
 # The window the harness budgets against, not each model's maximum: every step resends the
 # whole context, so a larger window costs more. Override with `models --context-window`.
 DEFAULT_CONTEXT_WINDOW = 128000
-# Hosted APIs return exact usage but expose no tokenizer. Three UTF-8 bytes per token stays
-# below typical English and code density (about 3.5 to 4), so estimates remain conservative.
-BYTES_PER_TOKEN = 3
 
 PROVIDERS = {
     'openai': {'label': 'OpenAI', 'base_url': 'https://api.openai.com/v1', 'key_env': 'OPENAI_API_KEY',

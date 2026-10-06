@@ -287,9 +287,8 @@ def test_switching_back_to_a_gguf_restores_a_local_context(config_dir, monkeypat
     assert (profile['backend'], profile['provider'], profile['n_ctx']) == ('embedded', None, 16384)
 
 
-def test_hosted_token_estimate_is_three_bytes_per_token():
+def test_hosted_token_estimate_starts_at_three_bytes_per_token():
     from model_backend import OpenAIModel
     hosted = OpenAIModel({'backend': 'openai', 'provider': 'openai', 'base_url': 'https://api.openai.com/v1'})
-    local = OpenAIModel({'backend': 'openai', 'base_url': 'http://127.0.0.1:8080/v1'})
+    assert hosted.tokenize_url is None
     assert hosted.count_tokens('a' * 3000) == 1000 and hosted.count_tokens('abcd') == 2
-    assert local.count_tokens('a' * 3000) == 3000
