@@ -1,5 +1,6 @@
 """Model adapters for embedded llama.cpp and local OpenAI-compatible servers."""
 import json
+import math
 import os
 import urllib.error
 import urllib.request
@@ -14,6 +15,12 @@ TUNING_INTS = ('n_threads', 'n_threads_batch', 'n_batch', 'n_ubatch')
 RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504, 529})
 MAX_MODEL_RETRIES = 2
 MAX_RETRY_AFTER_SECONDS = 60
+# Server prompt-size estimates: start at three UTF-8 bytes per token, then follow the prompt
+# tokens each response reports, keeping a margin and staying inside plausible bounds.
+INITIAL_BYTES_PER_TOKEN = 3.0
+MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN = 1.5, 6.0
+CALIBRATION_MARGIN = 0.9
+TOKENIZE_TIMEOUT_SECONDS = 5
 KV_TYPES = ('f16', 'q8_0', 'q4_0')
 EMBEDDED_INSTALL_HINT = ('Embedded GGUF inference requires llama-cpp-python: pip install -r requirements-embedded.txt. '
                          'Hosted providers and OpenAI-compatible servers do not need it.')
@@ -101,6 +108,7 @@ class ModelAdapter:
                    'end_to_end_completion_tokens_per_second': usage.get('completion_tokens') / elapsed
                        if type(usage.get('completion_tokens')) is int and elapsed > 0 else None}
         metrics.update(self.backend_metrics())
+        self.observe_prompt(kwargs, usage.get('prompt_tokens'))
         response['performance'] = metrics
         self.emit({'type': 'inference_metrics', **metrics})
         return response
@@ -110,6 +118,9 @@ class ModelAdapter:
 
     def backend_metrics(self):
         return {}
+
+    def observe_prompt(self, request, prompt_tokens):
+        """Called with each request and the prompt tokens the backend reported for it."""
 
     def count_tokens(self, text):
         # Conservative fallback for servers without a tokenizer API.
@@ -248,12 +259,51 @@ class OpenAIModel(ModelAdapter):
         if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError('base_url must be an HTTP(S) URL without embedded credentials')
         self.url = base + '/chat/completions'
+        # llama-server and vLLM serve /tokenize at the server root. Hosted providers have none.
+        self.tokenize_url = None if profile.get('provider') else f'{parsed.scheme}://{parsed.netloc}/tokenize'
+        self._tokenizer = None  # None: untried, True: answered once, False: unavailable
+        self.bytes_per_token = INITIAL_BYTES_PER_TOKEN
+        # Bumped when the estimate changes, so cached counts (session.ContextManager) are dropped.
+        self.count_version = 0
 
     def count_tokens(self, text):
-        if self.profile.get('provider'):
-            import providers
-            return -(-len(text.encode('utf-8')) // providers.BYTES_PER_TOKEN)
-        return super().count_tokens(text)
+        if self.tokenize_url and self._tokenizer is not False:
+            count = self._server_count(text)
+            if count is not None:
+                self._tokenizer = True
+                return count
+            if self._tokenizer is None:
+                self._tokenizer = False
+        return math.ceil(len(text.encode('utf-8')) / self.bytes_per_token)
+
+    def _server_count(self, text):
+        body = json.dumps({'content': text, 'prompt': text, 'model': self.profile.get('model', 'local-model'),
+                           'add_special': False}).encode()
+        import providers
+        request = urllib.request.Request(self.tokenize_url, data=body,
+                                         headers={'Content-Type': 'application/json', **providers.auth_headers(self.profile)})
+        try:
+            with urllib.request.urlopen(request, timeout=TOKENIZE_TIMEOUT_SECONDS) as response:
+                data = json.load(response)
+        except (OSError, ValueError):
+            return None
+        if isinstance(data, dict):
+            if isinstance(data.get('tokens'), list):
+                return len(data['tokens'])
+            if type(data.get('count')) is int and data['count'] >= 0:
+                return data['count']
+        return None
+
+    def observe_prompt(self, request, prompt_tokens):
+        if self._tokenizer or type(prompt_tokens) is not int or prompt_tokens <= 0:
+            return
+        encode = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        size = len(encode(request.get('messages', [])).encode('utf-8')) + len(encode(request.get('tools', [])).encode('utf-8'))
+        observed = min(MAX_BYTES_PER_TOKEN, max(MIN_BYTES_PER_TOKEN, size / prompt_tokens * CALIBRATION_MARGIN))
+        # Small drifts aren't worth invalidating every cached count.
+        if abs(observed - self.bytes_per_token) / self.bytes_per_token > 0.05:
+            self.bytes_per_token = observed
+            self.count_version += 1
 
     def _complete(self, **kwargs):
         for attempt in range(MAX_MODEL_RETRIES + 1):

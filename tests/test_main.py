@@ -1,10 +1,8 @@
 """Tests for main.py — CLI commands and helper functions."""
 
 import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 # Import the Typer app — avoid actually loading the LLM or connecting MCP
@@ -190,24 +188,35 @@ class TestHandleModelCommand:
         captured = capsys.readouterr()
         assert "Error" in captured.out or ".gguf" in captured.out.lower()
 
-    def test_numeric_selection_switches_model(self, config_dir, tmp_path, monkeypatch, capsys):
+    def test_numeric_selection_switches_model_without_loading_it(self, config_dir, tmp_path, monkeypatch, capsys):
         gguf = tmp_path / "alt.gguf"
-        gguf.write_text("fake")
+        gguf.write_bytes(b"GGUF\x03\x00\x00\x00")
 
         # Patch glob.glob to return our fake gguf
         monkeypatch.setattr("main.glob.glob", lambda _: [str(gguf)])
-
-        loaded = {}
-
-        def fake_llama(model_path, **kwargs):
-            loaded["path"] = model_path
-            return MagicMock()
-
-        from types import SimpleNamespace
-        monkeypatch.setattr("main.import_llama", lambda: SimpleNamespace(Llama=fake_llama))
         monkeypatch.setattr("builtins.input", lambda _: "1")
         app_module.handle_model_command()
-        assert "path" in loaded
+        import config
+        assert config.get_model_config()["model_path"] == str(gguf)
+        assert app_module.llm is None
+        assert "Switched to: alt.gguf" in capsys.readouterr().out
+
+    def test_rejects_a_file_without_a_gguf_header(self, config_dir, tmp_path, capsys, monkeypatch):
+        fake = tmp_path / "fake.gguf"
+        fake.write_text("not a model")
+        monkeypatch.setattr("builtins.input", lambda _: str(fake))
+        app_module.handle_model_command()
+        import config
+        assert "Not a GGUF model file" in capsys.readouterr().out
+        assert config.get_model_config()["model_path"] != str(fake)
+
+    def test_describes_a_hosted_model_without_a_path(self, config_dir, capsys, monkeypatch):
+        import config, providers
+        config.update_model_config({**config.get_model_config(), **providers.provider_profile("openai", "gpt-5-mini")})
+        monkeypatch.setattr("builtins.input", lambda _: "")
+        app_module.handle_model_command()
+        out = capsys.readouterr().out
+        assert "Current model: gpt-5-mini via openai" in out and "Path:" not in out
 
 
 def test_configure_openai_profile(config_dir):
@@ -287,9 +296,8 @@ def test_switching_back_to_a_gguf_restores_a_local_context(config_dir, monkeypat
     assert (profile['backend'], profile['provider'], profile['n_ctx']) == ('embedded', None, 16384)
 
 
-def test_hosted_token_estimate_is_three_bytes_per_token():
+def test_hosted_token_estimate_starts_at_three_bytes_per_token():
     from model_backend import OpenAIModel
     hosted = OpenAIModel({'backend': 'openai', 'provider': 'openai', 'base_url': 'https://api.openai.com/v1'})
-    local = OpenAIModel({'backend': 'openai', 'base_url': 'http://127.0.0.1:8080/v1'})
+    assert hosted.tokenize_url is None
     assert hosted.count_tokens('a' * 3000) == 1000 and hosted.count_tokens('abcd') == 2
-    assert local.count_tokens('a' * 3000) == 3000

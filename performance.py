@@ -1,6 +1,5 @@
 """Repeatable inference measurements; unavailable measurements remain null."""
 import statistics
-import time
 
 
 def benchmark(model, prompt, repeats=3, warmups=1, max_tokens=128):

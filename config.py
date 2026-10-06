@@ -1,5 +1,8 @@
 import json
 import os
+import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +17,13 @@ DEFAULT_CONFIG = {
     "n_ctx": 8192,
     "n_gpu_layers": -1
 }
+
+
+def retention(cfg=None) -> dict:
+    """Days to keep undo records, artifacts, traces and sessions; config.json's "retention" overrides."""
+    import housekeeping
+    cfg = load_config() if cfg is None else cfg
+    return housekeeping.retention_days(cfg.get('retention'))
 
 
 def ensure_config_dir():
@@ -32,22 +42,49 @@ def load_config() -> dict:
     try:
         with open(CONFIG_FILE, 'r') as f:
             config = json.load(f)
-        # Ensure all default keys exist
-        for key, value in DEFAULT_CONFIG.items():
-            if key not in config:
-                config[key] = value
-        return config
-    except (json.JSONDecodeError, IOError):
-        # If config is corrupted, return default
+        if not isinstance(config, dict):
+            raise ValueError('configuration is not a JSON object')
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as exc:
+        # Keep the damaged file for recovery instead of letting the next save overwrite its
+        # profiles and routes with defaults.
+        backup = CONFIG_FILE.with_name(f'{CONFIG_FILE.name}.corrupt-{time.strftime("%Y%m%d-%H%M%S")}')
+        os.replace(CONFIG_FILE, backup)
+        print(f'local-coder: {CONFIG_FILE} could not be read ({exc}); moved it to {backup} '
+              'and started from defaults.', file=sys.stderr)
         return DEFAULT_CONFIG.copy()
+    except OSError as exc:
+        raise OSError(f'Cannot read {CONFIG_FILE}: {exc}') from exc
+    # Ensure all default keys exist
+    for key, value in DEFAULT_CONFIG.items():
+        if key not in config:
+            config[key] = value
+    return config
+
+
+def write_json_atomic(path: Path, data, mode: Optional[int] = None):
+    """Write JSON so readers see either the old file or the complete new one, never a partial write."""
+    path = Path(path)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
+    try:
+        if mode is not None:
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def save_config(config: dict):
     """Save configuration to file."""
     ensure_config_dir()
-
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
+    write_json_atomic(CONFIG_FILE, config)
 
 
 def get_model_path() -> str:
@@ -105,6 +142,16 @@ def resolve_model_config(data, name=None, task_kind=None, use_routes=False):
             raise ValueError(f'Unknown model profile: {selected}')
         base = {**DEFAULT_CONFIG, **data['profiles'][selected]}
     return base
+
+
+def web_enabled(profile, override=None) -> bool:
+    """Whether web_search and web_fetch are offered. An explicit choice wins; otherwise they are on
+    only for hosted providers, which already send context off the machine."""
+    if override is not None:
+        return bool(override)
+    if profile.get('web') is not None:
+        return bool(profile['web'])
+    return bool(profile.get('provider'))
 
 
 def update_model_config(updates):

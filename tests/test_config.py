@@ -1,7 +1,6 @@
 """Tests for config.py — configuration loading, saving, and model path management."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -55,13 +54,24 @@ class TestLoadConfig:
         assert result["n_gpu_layers"] == cfg.DEFAULT_CONFIG["n_gpu_layers"]
         assert result["model_path"] == "/partial/model.gguf"
 
-    def test_returns_default_on_corrupt_json(self, config_dir):
+    def test_corrupt_json_is_moved_aside_not_overwritten(self, config_dir, capsys):
         config_dir.mkdir(parents=True, exist_ok=True)
-        cfg.CONFIG_FILE.write_text("{ NOT VALID JSON }")
+        cfg.CONFIG_FILE.write_text('{ "profiles": {"big": {} } NOT VALID JSON }')
         result = cfg.load_config()
         assert result == cfg.DEFAULT_CONFIG
+        backups = list(config_dir.glob('config.json.corrupt-*'))
+        assert len(backups) == 1 and 'profiles' in backups[0].read_text()
+        assert 'moved it to' in capsys.readouterr().err
+        cfg.save_config(result)
+        assert backups[0].exists()
 
-    def test_returns_default_on_io_error(self, config_dir, monkeypatch):
+    def test_non_object_json_is_treated_as_corrupt(self, config_dir):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        cfg.CONFIG_FILE.write_text('[1, 2]')
+        assert cfg.load_config() == cfg.DEFAULT_CONFIG
+        assert list(config_dir.glob('config.json.corrupt-*'))
+
+    def test_unreadable_config_raises_instead_of_resetting(self, config_dir, monkeypatch):
         config_dir.mkdir(parents=True, exist_ok=True)
         cfg.CONFIG_FILE.write_text("{}")
 
@@ -69,8 +79,30 @@ class TestLoadConfig:
             raise IOError("permission denied")
 
         monkeypatch.setattr("builtins.open", bad_open)
-        result = cfg.load_config()
-        assert result == cfg.DEFAULT_CONFIG
+        with pytest.raises(OSError, match='Cannot read'):
+            cfg.load_config()
+
+
+class TestAtomicWrite:
+    def test_failed_save_keeps_the_previous_file(self, config_dir, monkeypatch):
+        cfg.save_config({'profiles': {'keep': {}}})
+
+        def broken_dump(*args, **kwargs):
+            args[1].write('{"partial": ')
+            raise RuntimeError('disk full')
+
+        with monkeypatch.context() as patch:
+            patch.setattr(cfg.json, 'dump', broken_dump)
+            with pytest.raises(RuntimeError):
+                cfg.save_config({'profiles': {}})
+        assert json.loads(cfg.CONFIG_FILE.read_text()) == {'profiles': {'keep': {}}}
+        assert not [p for p in config_dir.iterdir() if p.name.endswith('.tmp')]
+
+    def test_mode_is_applied(self, tmp_path):
+        target = tmp_path / 'keys.json'
+        cfg.write_json_atomic(target, {'a': 'b'}, mode=0o600)
+        assert target.stat().st_mode & 0o777 == 0o600
+        assert json.loads(target.read_text()) == {'a': 'b'}
 
 
 # ---------------------------------------------------------------------------

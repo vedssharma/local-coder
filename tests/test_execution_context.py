@@ -1,9 +1,6 @@
-import json
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import MagicMock
 
 import pytest
 from execution_context import ExecutionContext, ExecutionCancelled, DeadlineExceeded

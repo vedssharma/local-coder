@@ -11,21 +11,22 @@ Python 3.10+ is required. Node.js is not required.
 ```bash
 python -m venv llm
 source llm/bin/activate
-pip install -r requirements.txt
-pip install pytest pytest-asyncio
+pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-That is enough for hosted providers and OpenAI-compatible servers. To run GGUF models in-process, also install llama-cpp-python, which needs a C/C++ build toolchain:
+This installs a `local-coder` command (the same CLI as `python main.py`), the MCP server's dependency, and the pinned test tools. Use `pip install -e .` for the CLI alone, or `pip install -e ".[mcp]"` to also run the MCP server. That is enough for hosted providers and OpenAI-compatible servers. To run GGUF models in-process, also install the `embedded` extra, which builds llama-cpp-python and needs a C/C++ build toolchain:
 
 ```bash
-pip install -r requirements-embedded.txt
+pip install -e ".[embedded]"
 ```
+
+`requirements.txt` and `requirements-embedded.txt` remain for Docker and existing setups.
 
 For a CPU build when compiler environment variables point to unavailable tools:
 
 ```bash
-CC=gcc CXX=g++ CMAKE_BUILD_PARALLEL_LEVEL=2 pip install -r requirements-embedded.txt
+CC=gcc CXX=g++ CMAKE_BUILD_PARALLEL_LEVEL=2 pip install -e ".[embedded]"
 ```
 
 The test suite stubs llama-cpp-python, so it runs without the native build.
@@ -52,15 +53,15 @@ python main.py models --backend openai \
   --context-window 8192 --tools --stream
 ```
 
-To use a hosted frontier model instead, pick a provider (`openai`, `anthropic`, `google`, `xai`, `mistral`, `deepseek`). You are prompted for the API key with hidden input, or you can set the provider's environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`), which takes precedence. Keys are stored in `~/.local-coder/keys.json` (mode 0600), never in `config.json`. Inside `chat`, `/model` then `api` runs the same selection interactively. Prompts and file context are sent to the provider.
+To use a hosted frontier model instead, pick a provider (`openai`, `anthropic`, `google`, `xai`, `mistral`, `deepseek`). You are prompted for the API key with hidden input, or you can set the provider's environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`), which takes precedence. Keys are stored in `~/.local-coder/keys.json` (mode 0600), never in `config.json`. Inside `chat`, `/model` then `api` runs the same selection interactively. Prompts and file context are sent to the provider. After each turn with a hosted model, the CLI prints the input, cached and output tokens the provider reported. Add prices to get an estimated cost too: `python main.py models --price-input 3 --price-output 15 --price-cached 0.3` (USD per million tokens, saved with the profile and cleared when you switch provider). local-coder ships no price table, since provider prices change.
 
-Selecting a provider sets the context window the harness budgets against to 128,000 tokens (64,000 for DeepSeek). This is below most hosted models' maximum on purpose, because each step resends the whole context; pass `--context-window` to change it. Hosted APIs don't expose a tokenizer, so prompt size is estimated at three UTF-8 bytes per token. If you configured a provider before this default existed, run `models --provider ...` again or set `--context-window`. Switching back to a GGUF model restores the local default of 8,192 unless you pass `--context-window`.
+Selecting a provider sets the context window the harness budgets against to 128,000 tokens (64,000 for DeepSeek). This is below most hosted models' maximum on purpose, because each step resends the whole context; pass `--context-window` to change it. Hosted APIs don't expose a tokenizer, so prompt size is estimated: three UTF-8 bytes per token at first, then adjusted from the prompt token counts each response reports (with a 10% safety margin). A local OpenAI-compatible server is asked for exact counts through its `/tokenize` endpoint (llama-server and vLLM have one); if it doesn't answer, the same estimate is used. If you configured a provider before this default existed, run `models --provider ...` again or set `--context-window`. Switching back to a GGUF model restores the local default of 8,192 unless you pass `--context-window`.
 
 ```bash
 python main.py models --provider anthropic --model-name claude-sonnet-5-5 --api-key
 ```
 
-`--chat-format` selects an embedded llama.cpp chat format. `--no-tools` marks a model that cannot use native tool calls. `--no-stream` disables streaming when a server does not support it. Optional API authentication uses `LOCAL_CODER_API_KEY`, or the environment variable named by `api_key_env` in configuration; never put key values in configuration or source. `request_timeout` controls the server's socket timeout (default 60 seconds). Requests to a server or provider that fail with 408, 429, 500, 502, 503, 504 or 529, or whose connection drops before any output, are retried up to twice. The retry honors `Retry-After` (capped at 60 seconds) or otherwise waits 1 and then 2 seconds, and it never waits past the run's time budget. Other errors, and failures after output has started streaming, end the run as before.
+`--chat-format` selects an embedded llama.cpp chat format. `--no-tools` marks a model that cannot use native tool calls; the tools are then described in the system prompt, the model calls them with `<tool_call>{"name": ..., "arguments": {...}}</tool_call>` blocks (or a fenced JSON block), and results come back as user messages. `--no-stream` disables streaming when a server does not support it. Optional API authentication uses `LOCAL_CODER_API_KEY`, or the environment variable named by `api_key_env` in configuration; never put key values in configuration or source. `request_timeout` controls the server's socket timeout (default 60 seconds). Requests to a server or provider that fail with 408, 429, 500, 502, 503, 504 or 529, or whose connection drops before any output, are retried up to twice. The retry honors `Retry-After` (capped at 60 seconds) or otherwise waits 1 and then 2 seconds, and it never waits past the run's time budget. Other errors, and failures after output has started streaming, end the run as before.
 
 ## Use the harness
 
@@ -85,13 +86,15 @@ The model has eight tools:
 - `list` (all modes): workspace file paths under a directory, optionally filtered by a glob such as `**/*.py` (default 200 entries, at most 1,000). In a Git repository it respects `.gitignore`; `.git`, `.local-coder`, `node_modules`, virtual environments, and caches are always skipped, as are symlinks that resolve outside the workspace.
 - `search` (all modes): a regular-expression search of file contents, returning `path:line: text` matches (default 50, at most 200). Optional `path`, filename `glob`, and `case_sensitive`. It skips the same paths as `list`, binary files, and files over 1 MB.
 - `write`: create a file or overwrite it entirely (`workspace-edit` mode or higher).
-- `edit`: replace exactly one matching block of text in an existing file (`workspace-edit` mode or higher).
+- `edit`: replace exactly one matching block of text in an existing file (`workspace-edit` mode or higher). If `old_text` appears more than once, the error lists the line where each match starts and an optional `start_line` picks one. If it isn't found exactly, a unique match that differs only in trailing whitespace or a uniform indentation shift is used (the same shift is applied to `new_text`) and the result says so; otherwise the error shows the closest block with line numbers.
 - `bash` (`execute` mode): run a non-interactive Bash command, including pipes, redirects, and multiline scripts, and wait for it to finish. Use it for `git diff`, running checks, and anything `list` and `search` don't cover. It returns combined stdout/stderr and the exit status. The timeout is 1–300 seconds (default 60) and the optional `cwd` must resolve inside the workspace. Output retains at most 32,000 bytes and reports truncation. Bash must be installed on PATH; it runs without profile or rc files, with stdin closed. Each call starts a fresh shell; variables and working-directory changes do not persist between calls. `bash` runs with host privileges and the command body is not filesystem-sandboxed. The runtime terminates any remaining command processes when it closes.
 - `web_search` and `web_fetch`: see below.
 
 For example, the agent can call `bash` with `{"command": "python -m pytest -q", "cwd": ".", "timeout_seconds": 120}`. Repository instructions and tool output cannot elevate the selected mode.
 
-The native `web_search` and `web_fetch` tools are available in all permission modes for inspection and coding tasks. `--task-kind answer` still disables all tools. They work through the shared runtime in both the CLI and MCP server, with no extra Python dependencies.
+The native `web_search` and `web_fetch` tools work in every permission mode, but they are **off by default for embedded and local-server models** and on for hosted providers. Any tool that reaches the network can carry workspace content out (a `web_fetch` URL can include text the model read), and a prompt injection in a file or page could ask for exactly that. Hosted providers already receive your context, so web access adds little there; for a fully local setup it would be the only path off the machine.
+
+Turn them on or off per profile with `python main.py models --web` or `--no-web`, or for one run with `--web`/`--no-web` on `ask`, `chat`, and `edit`. The MCP server follows the profile unless `LOCAL_CODER_WEB=1` or `0` is set at launch. When they are off, the tools are not offered and the system prompt does not mention them. `--task-kind answer` still disables all tools. They need no extra Python dependencies.
 
 - `web_search`: accepts `query`, optional `max_results` (1–10, default 5), and `timeout_seconds` (1–30, default 20). Returns source URLs, titles, snippets, and the provider name. It uses DuckDuckGo's HTML search by default. Set `BRAVE_SEARCH_API_KEY` in the harness process environment to use the Brave Search API instead; the key is not passed in model tool arguments or returned in results. Queries are sent to the selected search provider. Provider errors and bot challenges are reported as errors, not invented results.
 - `web_fetch`: accepts `url`, optional `max_chars` (100–50,000, default 12,000), and `timeout_seconds` (1–30, default 20). Returns the final URL, HTTP status, content type, title, extracted text, and a truncation flag. HTML scripts and styles are removed; plain text, JSON, and XML are supported. It reads at most 1 MB per response. JavaScript rendering, authenticated browsing, PDFs, and binary downloads are not supported.
@@ -121,9 +124,11 @@ python main.py chat --resume SESSION_ID
 python main.py undo
 ```
 
-Chat commands: `/sessions`, `/resume ID`, `/new`, `/undo`, `/model`, `/md`, and `/exit`. Undo restores only the latest recorded harness patch whose current contents still match the patch result. It preserves pre-existing user edits and refuses to overwrite subsequent changes. Arbitrary command edits are not automatically undoable.
+Chat commands: `/sessions`, `/resume ID`, `/new`, `/undo`, `/undo turn`, `/model`, `/md`, and `/exit`. Undo restores only the latest recorded harness patch whose current contents still match the patch result. `/undo turn` (or `python main.py undo --turn`) reverts every patch from the most recent turn, newest first, and changes nothing if any of those files changed since. It preserves pre-existing user edits and refuses to overwrite subsequent changes. Arbitrary command edits are not automatically undoable.
 
-Context budgeting counts tools, transcript, framing, and reserved generation space. Embedded inference uses its tokenizer; server inference conservatively estimates from UTF-8 bytes. Complete older turns are compacted into a bounded summary of requests, decisions, tool use, and observations. Summaries are lossy. The active turn is preserved; if it cannot fit, the run blocks instead of silently discarding it. Large tool results are shortened, with retained output artifacts under `.local-coder/artifacts` where applicable. Command output retains the latest 32 KB.
+`/sessions` lists this workspace's sessions, newest first, with the date and first prompt. Harness state is pruned when a run starts: undo records, artifacts and traces under `.local-coder/` after 30 days, and this workspace's sessions after 90 days (a session open in another runtime is skipped). Change the limits with a `retention` object in `~/.local-coder/config.json`, for example `{"retention": {"sessions": 365, "undo": null}}`, where `null` keeps that kind forever. `python main.py clean` applies the limits now; `--older-than DAYS` uses one limit for everything and `--dry-run` only reports what would go.
+
+Context budgeting counts tools, transcript, framing, and reserved generation space. Embedded inference uses its tokenizer; server inference conservatively estimates from UTF-8 bytes. Complete older turns are compacted into a summary of requests, decisions, tool use, and observations. The summary gets about 5% of the context window (between 800 and 24,000 characters), keeping the newest notes that fit. Summaries are lossy. The active turn is preserved; if it cannot fit, the run blocks instead of silently discarding it. Large tool results are shortened, with retained output artifacts under `.local-coder/artifacts` where applicable. Command output retains the latest 32 KB.
 
 Root `AGENTS.md` applies to the workspace. Ranged reads include applicable ancestor and directory instructions for their target. `CONTEXT.md` provides optional project context. Neither can change executor permissions.
 
@@ -138,7 +143,7 @@ cd /path/to/your/project
 /path/to/local-coder/llm/bin/python /path/to/local-coder/skills/local-coder/scripts/server.py
 ```
 
-It exposes `ask`, `chat`, `edit`, `get_model`, and `set_model` over stdio. Responses from coding tools include `status`, `text`, budgets consumed, and `session_id`. The server defaults to read-only. Set `LOCAL_CODER_PERMISSION_MODE=workspace-edit` or `execute` at launch to enable those capabilities. MCP arguments cannot grant permissions. See the [setup guide](skills/local-coder/references/setup.md).
+It exposes `ask`, `chat`, `edit`, `get_model`, and `set_model` over stdio. Responses from coding tools include `status`, `text`, budgets consumed, and `session_id`. The server defaults to read-only. Set `LOCAL_CODER_PERMISSION_MODE=workspace-edit` or `execute` at launch to enable those capabilities. MCP arguments cannot grant permissions. Each call gets the CLI's run budget (30 steps, 300 seconds, 8,192 generated tokens); set `LOCAL_CODER_MAX_STEPS`, `LOCAL_CODER_MAX_SECONDS` or `LOCAL_CODER_TOKEN_BUDGET` at launch to change it. See the [setup guide](skills/local-coder/references/setup.md).
 
 ## Evaluate changes
 
@@ -146,7 +151,10 @@ The ordinary test suite validates implementation behavior without loading an LLM
 
 ```bash
 python -m pytest -q
+ruff check .
 ```
+
+CI runs both on Python 3.10, 3.11 and 3.12, plus every scripted evaluation (`--scripted --suite all`).
 
 Six disposable-repository evaluations cover navigation, a bug fix, a multi-file change, recovery from a failing check, permissions, and continuing an unfinished task after restart:
 
@@ -187,7 +195,7 @@ Thread, batch, attention, and KV-cache options apply to embedded inference. KV t
 
 Reports retain individual samples and medians for request latency, load time, first streamed output, and available native prompt/generation throughput. Unsupported rates remain null; server end-to-end latency is not mislabeled as decode speed. A warm-up excludes model loading from the sampled steady-state requests; use `--warmups 0` to include a cold first request. Run results also contain total, context preparation, model, and tool timings and call counts. Real benchmarks require a configured model.
 
-`--task-kind auto` exposes inspection tools (`read`, `list`, `search`, `web_search`, `web_fetch`) in read-only mode and all permitted tools in edit/execute modes. Use `answer` for a tool-free question, `inspect` for reads and web lookups, `code` for permitted coding tools, or `all`. Selection narrows capabilities; it never grants permissions. Default reads return 100 lines, `@file` preloads are bounded to 8 KB, and unchanged preloads already retained in the transcript are not injected twice. Changed files and references whose old context was compacted away are injected again.
+`--task-kind auto` exposes inspection tools (`read`, `list`, `search`, and `web_search` and `web_fetch` when web access is on) in read-only mode and all permitted tools in edit/execute modes. Use `answer` for a tool-free question, `inspect` for reads and web lookups, `code` for permitted coding tools, or `all`. Selection narrows capabilities; it never grants permissions. Default reads return 100 lines, `@file` preloads are bounded to 8 KB, and unchanged preloads already retained in the transcript are not injected twice. Changed files and references whose old context was compacted away are injected again.
 
 Duplicate reads within one model response share an execution. Reads across steps execute again to detect changes, but identical retained observations are referenced instead of appended in full. Errors and command results are never reused.
 

@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 import config
 from helpers import parse_file_references
 from model_backend import create_model
+from agent import RunBudget
 from runtime import Runtime
 from workspace_tools import WorkspaceTools
 
@@ -22,6 +23,31 @@ mcp = FastMCP('local-coder')
 _model = None
 _model_signature = None
 _lock = threading.RLock()
+
+
+def _env_flag(name):
+    """True/False from a 1/0 (or true/false) environment variable; None when it is unset."""
+    value = os.environ.get(name, '').strip().lower()
+    if not value:
+        return None
+    if value in ('1', 'true', 'yes', 'on'):
+        return True
+    if value in ('0', 'false', 'no', 'off'):
+        return False
+    raise ValueError(f'{name} must be 1 or 0')
+
+
+def _budget():
+    """The run budget for MCP turns: the CLI's defaults unless the host sets them at launch."""
+    def number(name, default, cast):
+        value = os.environ.get(name, '').strip()
+        try:
+            return cast(value) if value else default
+        except ValueError:
+            raise ValueError(f'{name} must be a number') from None
+    return RunBudget(number('LOCAL_CODER_MAX_STEPS', 30, int),
+                     number('LOCAL_CODER_MAX_SECONDS', 300.0, float),
+                     number('LOCAL_CODER_TOKEN_BUDGET', 8192, int))
 
 
 def get_model_instance(profile_name=None):
@@ -41,9 +67,11 @@ def run_turn(prompt, files=None, session_id=None, max_tokens=None, profile_name=
     # One model/session write at a time. No shared mutable transcripts across callers.
     with _lock:
         with Runtime(get_model_instance(profile_name), os.getcwd(), config.CONFIG_DIR,
-                     mode=os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only'),
+                     mode=os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only'), budget=_budget(),
                      context_window=config.get_model_config(profile_name)['n_ctx'],
-                     tool_workers=int(os.environ.get('LOCAL_CODER_TOOL_WORKERS', '4'))) as runtime:
+                     tool_workers=int(os.environ.get('LOCAL_CODER_TOOL_WORKERS', '4')),
+                     web=config.web_enabled(config.get_model_config(profile_name), _env_flag('LOCAL_CODER_WEB')),
+                     retention=config.retention()) as runtime:
             if session_id:
                 runtime.resume(session_id)
             original, contents = parse_file_references(prompt, root=runtime.tools.root)
@@ -86,7 +114,7 @@ def get_model() -> dict:
 @mcp.tool()
 def set_model(path: str) -> dict:
     """Set a workspace-local GGUF model; disabled in read-only mode."""
-    global _model
+    global _model, _model_signature
     if os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only') == 'read-only':
         return {'status': 'blocked', 'text': 'Model configuration is read-only.'}
     with _lock:
@@ -96,7 +124,11 @@ def set_model(path: str) -> dict:
             profile = config.get_model_config()
             profile['backend'] = 'embedded'
             config.update_model_config(profile)
+            # Release the old weights now; dropping the reference would keep them until exit.
+            if _model is not None:
+                _model.close()
             _model = None
+            _model_signature = None
         return {'status': 'completed' if success else 'blocked'}
 
 

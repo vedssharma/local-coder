@@ -13,9 +13,6 @@ import config
 # The window the harness budgets against, not each model's maximum: every step resends the
 # whole context, so a larger window costs more. Override with `models --context-window`.
 DEFAULT_CONTEXT_WINDOW = 128000
-# Hosted APIs return exact usage but expose no tokenizer. Three UTF-8 bytes per token stays
-# below typical English and code density (about 3.5 to 4), so estimates remain conservative.
-BYTES_PER_TOKEN = 3
 
 PROVIDERS = {
     'openai': {'label': 'OpenAI', 'base_url': 'https://api.openai.com/v1', 'key_env': 'OPENAI_API_KEY',
@@ -56,10 +53,7 @@ def save_key(provider, key):
     config.ensure_config_dir()
     keys = _load_keys()
     keys[provider] = key
-    fd = os.open(keys_file(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as f:
-        json.dump(keys, f)
-    os.chmod(keys_file(), 0o600)
+    config.write_json_atomic(keys_file(), keys, mode=0o600)
 
 
 def resolve_key(profile):
@@ -130,3 +124,32 @@ def select_provider_interactively(ask=None, say=print, ask_secret=None):
         say('No API key provided; cancelled.')
         return None
     return profile
+
+
+def estimate_cost(profile, prompt_tokens, completion_tokens, cached_prompt_tokens=0):
+    """Estimated USD cost from the profile's price (USD per million tokens: input, output and
+    optionally cached_input, which defaults to the input price). None when no price is set."""
+    price = profile.get('price')
+    if not isinstance(price, dict) or price.get('input') is None or price.get('output') is None:
+        return None
+    cached = min(cached_prompt_tokens, prompt_tokens)
+    cached_price = price['input'] if price.get('cached_input') is None else price['cached_input']
+    return ((prompt_tokens - cached) * price['input'] + cached * cached_price
+            + completion_tokens * price['output']) / 1_000_000
+
+
+def describe_usage(profile, performance):
+    """One line of token usage and estimated cost for a turn, or None if the server reported no usage."""
+    if not performance.get('usage_reports'):
+        return None
+    prompt, cached = performance['prompt_tokens'], performance['cached_prompt_tokens']
+    line = f"Usage: {prompt:,} input tokens"
+    if cached:
+        line += f" ({cached:,} cached)"
+    line += f", {performance['completion_tokens']:,} output tokens"
+    cost = estimate_cost(profile, prompt, performance['completion_tokens'], cached)
+    if cost is not None:
+        line += f"; estimated ${cost:.4f}"
+    if performance['usage_reports'] < performance.get('model_calls', 0):
+        line += f" ({performance['usage_reports']} of {performance['model_calls']} model calls reported usage)"
+    return line

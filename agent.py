@@ -5,7 +5,6 @@ import re
 import time
 from typing import Literal
 
-from jsonschema import ValidationError
 from session import ContextManager
 from tool_result import ToolResult, invoke_tool
 from tool_registry import ToolRegistry, ToolSpec
@@ -51,13 +50,11 @@ class RunResult:
     verification_scope: str = 'observed_commands_and_changes'
 
 
-def _build_tool_schemas(mcp_client=None):
-    if not mcp_client or not mcp_client.is_connected:
-        return []
-    return mcp_client.get_openai_tool_schemas()
+def _build_tool_schemas(tools=None):
+    return tools.get_openai_tool_schemas() if tools else []
 
 
-def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
+def run_agent(llm, messages, max_tokens=512, tools=None, budget=None,
               cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None, tool_schemas=None,
               tool_executor=None, execution_context=None, tool_workers=4, checkpoint=None, reserved_call_ids=()):
     """Run a turn. Completion means the model finished, not that its claims were verified.
@@ -69,13 +66,16 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     reserved_call_ids = set(reserved_call_ids)
     budget = budget or RunBudget()
     emit = emit or (lambda event: None)
-    schemas = _build_tool_schemas(mcp_client) if tool_schemas is None else tool_schemas
+    schemas = _build_tool_schemas(tools) if tool_schemas is None else tool_schemas
     from model_backend import ModelAdapter
-    if isinstance(llm, ModelAdapter) and not llm.profile.get("supports_tools", True):
-        schemas = []
     schemas = sorted(schemas, key=lambda s: s['function']['name'])
+    # Models without native tool calling get the tools described in the prompt and reply with
+    # <tool_call> blocks; the transcript keeps the usual shape and is translated per request.
+    if isinstance(llm, ModelAdapter) and not llm.profile.get("supports_tools", True) and schemas:
+        inline_tool_calls = True
+        describe_inline_tools(messages, schemas)
     registered = {s['function']['name'] for s in schemas}
-    registry = getattr(mcp_client, 'registry', None)
+    registry = getattr(tools, 'registry', None)
     if not isinstance(registry, ToolRegistry):
         # Unknown external tools retain conservative execution metadata.
         registry = ToolRegistry()
@@ -91,7 +91,8 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
 
     progress = ProgressTracker()
     observations = {}
-    metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0}
+    metrics = {'model_seconds': 0.0, 'context_seconds': 0.0, 'tool_seconds': 0.0, 'model_calls': 0, 'tool_calls': 0,
+               'prompt_tokens': 0, 'completion_tokens': 0, 'cached_prompt_tokens': 0, 'usage_reports': 0}
 
     def finish(status, text, reason=''):
         result = RunResult(status, text, steps, generated, reason, {**metrics, 'total_seconds': time.monotonic() - started,
@@ -113,11 +114,13 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         emit({'type': 'model_started', 'step': steps})
         kwargs = {'messages': messages,
                   'max_tokens': min(max_tokens, budget.max_generated_tokens - generated), 'stream': False}
-        if schemas:
+        if schemas and not inline_tool_calls:
             kwargs['tools'] = schemas
         try:
             phase = time.monotonic()
             context_manager.fit(messages, schemas, kwargs['max_tokens'])
+            if inline_tool_calls:
+                kwargs['messages'] = inline_transcript(messages)
             metrics['context_seconds'] += time.monotonic() - phase
             phase = time.monotonic()
             metrics['model_calls'] += 1
@@ -136,7 +139,8 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             return finish('budget_exhausted', 'Run deadline exceeded.', 'deadline')
         except Exception as exc:
             return finish('blocked', f'Model request failed: {exc}', 'model_error')
-        usage = response.get('usage', {}).get('completion_tokens')
+        record_usage(metrics, response.get('usage'))
+        usage = (response.get('usage') or {}).get('completion_tokens')
         generated += usage if isinstance(usage, int) and usage >= 0 else max(1, context_manager.count_tokens(json.dumps(message)))
         if result := stopped(check_tokens=False):
             return result
@@ -156,7 +160,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         if not calls and inline_tool_calls:
             calls = _parse_inline_tool_calls(message.get('content'))
             if calls:
-                message = {'role': 'assistant', 'content': None, 'tool_calls': calls}
+                message = {'role': 'assistant', 'content': message.get('content'), 'tool_calls': calls}
         if not calls:
             text = message.get('content')
             if text:
@@ -189,7 +193,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         checkpoint('batch', message, None, None)
         halt = None
         scheduler = ToolScheduler(registry, registered,
-            tool_executor or (lambda name, args: invoke_tool(mcp_client, name, args)),
+            tool_executor or (lambda name, args: invoke_tool(tools, name, args)),
             execution_context, emit, tool_workers, checkpoint)
         for call, args, tool_result in scheduler.run(calls):
             name = call['function']['name']
@@ -233,36 +237,95 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     return finish('budget_exhausted', 'Step budget exhausted; work may be incomplete.', 'step_limit')
 
 
-def run_agent_loop(llm, messages, console, max_tokens=512, mcp_client=None, **kwargs):
-    """Compatibility text interface. New integrations should consume run_agent's result."""
-    def emit(event):
-        if event['type'] == 'tool_started':
-            console.print(f"[dim]tool: {event['name']}[/dim]")
-    result = run_agent(llm, messages, max_tokens, mcp_client, emit=emit, **kwargs)
-    if result.status != 'completed':
-        console.print(f'[{result.status}] {result.text}', markup=False)
-    return result.text
+def record_usage(metrics, usage):
+    """Add a response's reported token usage to the run's totals; usage_reports counts the responses that had it."""
+    if not isinstance(usage, dict) or not isinstance(usage.get('prompt_tokens'), int):
+        return
+    metrics['usage_reports'] += 1
+    metrics['prompt_tokens'] += usage['prompt_tokens']
+    if isinstance(usage.get('completion_tokens'), int):
+        metrics['completion_tokens'] += usage['completion_tokens']
+    cached = (usage.get('prompt_tokens_details') or {}).get('cached_tokens')
+    if isinstance(cached, int):
+        metrics['cached_prompt_tokens'] += cached
+
+
+INLINE_TOOLS_MARKER ='Tools you can call (this model has no native tool calling):'
+
+
+def describe_inline_tools(messages, schemas):
+    """Add the tool list and call format to the system message, once."""
+    lines = [INLINE_TOOLS_MARKER]
+    for schema in schemas:
+        function = schema['function']
+        lines.append(f"- {function['name']}: {function.get('description', '')}\n  parameters: "
+                     + json.dumps(function.get('parameters', {}), separators=(',', ':')))
+    lines.append('To call a tool, reply with one or more blocks of exactly this form and nothing after them:\n'
+                 '<tool_call>\n{"name": "read", "arguments": {"path": "main.py"}}\n</tool_call>\n'
+                 'Each result comes back in a message starting with "Tool result". '
+                 'When you are done, answer in plain text without a tool call.')
+    text = '\n'.join(lines)
+    if messages and messages[0].get('role') == 'system':
+        if INLINE_TOOLS_MARKER not in (messages[0].get('content') or ''):
+            messages[0] = {**messages[0], 'content': (messages[0].get('content') or '') + '\n\n' + text}
+    else:
+        messages.insert(0, {'role': 'system', 'content': text})
+
+
+def inline_transcript(messages):
+    """The transcript as a model without tool roles sees it: calls stay as the assistant's own
+    text, and each tool result becomes a user message."""
+    names = {}
+    converted = []
+    for message in messages:
+        if message.get('role') == 'assistant' and message.get('tool_calls'):
+            for call in message['tool_calls']:
+                names[call.get('id')] = call.get('function', {}).get('name', 'tool')
+            text = message.get('content') or '\n'.join(
+                '<tool_call>\n' + json.dumps({'name': c['function']['name'], 'arguments': _arguments(c)}) + '\n</tool_call>'
+                for c in message['tool_calls'])
+            converted.append({'role': 'assistant', 'content': text})
+        elif message.get('role') == 'tool':
+            name = names.get(message.get('tool_call_id'), 'tool')
+            converted.append({'role': 'user', 'content': f"Tool result ({name}, {message.get('tool_call_id')}):\n{message.get('content', '')}"})
+        else:
+            converted.append(message)
+    return converted
+
+
+def _arguments(call):
+    raw = call['function'].get('arguments')
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return raw
 
 
 def _parse_inline_tool_calls(content):
     """
-    Parse tool calls the model emitted as a markdown JSON block, e.g.:
+    Parse tool calls a model wrote as text, in either of these forms:
+
+        <tool_call>{"name": "read", "arguments": {"path": "main.py"}}</tool_call>
 
         ```json
         {"name": "read", "arguments": {"path": "main.py"}}
         ```
 
-    Returns a list of tool_call dicts in OpenAI format, or an empty list.
+    The first is what Qwen2.5-Coder and Hermes-style chat templates emit. Returns a list of
+    tool_call dicts in OpenAI format, or an empty list.
     """
     if not content:
         return []
     calls = []
-    for i, raw in enumerate(re.findall(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)):
+    blocks = re.findall(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', content, re.DOTALL)
+    if not blocks:
+        blocks = re.findall(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+    for i, raw in enumerate(blocks):
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj.get("name"), str) and "arguments" in obj:
+        if isinstance(obj, dict) and isinstance(obj.get("name"), str) and "arguments" in obj:
             args = obj["arguments"]
             calls.append({
                 "id": f"call_{i}",
@@ -274,13 +337,3 @@ def _parse_inline_tool_calls(content):
             })
     return calls
 
-
-def _format_args(args):
-    """Format tool arguments for display, truncating long values."""
-    parts = []
-    for k, v in args.items():
-        s = str(v)
-        if len(s) > 60:
-            s = s[:57] + "..."
-        parts.append(f"{k}={s!r}")
-    return ", ".join(parts)

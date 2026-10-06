@@ -75,6 +75,6 @@ def test_agent_uses_registered_cache_and_side_effect_policies(tmp_path):
         {'choices': [{'message': {'content': None, 'tool_calls': calls}, 'finish_reason': 'tool_calls'}]},
         {'choices': [{'message': {'content': 'done'}, 'finish_reason': 'stop'}]}]
     messages = []
-    assert run_agent(model, messages, mcp_client=tools).status == 'completed'
+    assert run_agent(model, messages, tools=tools).status == 'completed'
     assert read.call_count == 2
     assert [json.loads(m['content'])['data'] for m in messages if m['role'] == 'tool'] == ['old', 'old', 'changed', 'new']

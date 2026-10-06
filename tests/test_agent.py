@@ -1,41 +1,12 @@
 """Tests for agent.py — agentic tool-calling loop and helpers."""
 
 import json
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 import agent
 
-
-# ---------------------------------------------------------------------------
-# _format_args
-# ---------------------------------------------------------------------------
-
-class TestFormatArgs:
-    def test_simple_key_value(self):
-        result = agent._format_args({"path": "/tmp"})
-        assert "path='/tmp'" in result
-
-    def test_multiple_args_joined_by_comma(self):
-        result = agent._format_args({"a": "1", "b": "2"})
-        assert "a='1'" in result
-        assert "b='2'" in result
-
-    def test_long_value_truncated(self):
-        long_val = "x" * 100
-        result = agent._format_args({"key": long_val})
-        assert len(result) < 100
-        assert "..." in result
-
-    def test_empty_args(self):
-        result = agent._format_args({})
-        assert result == ""
-
-    def test_value_at_exactly_60_chars_not_truncated(self):
-        val = "y" * 60
-        result = agent._format_args({"k": val})
-        assert "..." not in result
 
 
 # ---------------------------------------------------------------------------
@@ -112,14 +83,8 @@ class TestBuildToolSchemas:
     def test_returns_empty_when_no_client(self):
         assert agent._build_tool_schemas(None) == []
 
-    def test_returns_empty_when_not_connected(self):
+    def test_delegates_to_tools(self):
         client = MagicMock()
-        client.is_connected = False
-        assert agent._build_tool_schemas(client) == []
-
-    def test_delegates_to_client_when_connected(self):
-        client = MagicMock()
-        client.is_connected = True
         client.get_openai_tool_schemas.return_value = [{"type": "function"}]
         result = agent._build_tool_schemas(client)
         assert result == [{"type": "function"}]
@@ -127,8 +92,11 @@ class TestBuildToolSchemas:
 
 
 # ---------------------------------------------------------------------------
-# run_agent_loop
+# run_agent
 # ---------------------------------------------------------------------------
+
+def _run(llm, messages, **kwargs):
+    return agent.run_agent(llm, messages, **kwargs).text
 
 def _make_text_response(text="Final answer."):
     """Helper: build a mock LLM response with plain text content."""
@@ -166,74 +134,69 @@ def _make_tool_call_response(tool_name, args_dict):
     }
 
 
-class TestRunAgentLoop:
-    def test_returns_text_when_llm_answers_directly(self, mock_llm, mock_console):
+class TestRunAgent:
+    def test_returns_text_when_llm_answers_directly(self, mock_llm):
         mock_llm.create_chat_completion.return_value = _make_text_response("Hello!")
         messages = [{"role": "user", "content": "hi"}]
-        result = agent.run_agent_loop(mock_llm, messages, mock_console, max_tokens=64)
+        result = _run(mock_llm, messages, max_tokens=64)
         assert result == "Hello!"
 
-    def test_final_answer_appended_to_messages(self, mock_llm, mock_console):
+    def test_final_answer_appended_to_messages(self, mock_llm):
         mock_llm.create_chat_completion.return_value = _make_text_response("Done.")
         messages = [{"role": "user", "content": "hi"}]
-        agent.run_agent_loop(mock_llm, messages, mock_console, max_tokens=64)
+        _run(mock_llm, messages, max_tokens=64)
         assert messages[-1] == {"role": "assistant", "content": "Done."}
 
-    def test_calls_mcp_tool_and_loops(self, mock_llm, mock_mcp_client, mock_console):
+    def test_calls_mcp_tool_and_loops(self, mock_llm, mock_tools):
         """LLM first returns a tool call, then returns text."""
         mock_llm.create_chat_completion.side_effect = [
             _make_tool_call_response("read_file", {"path": "x.py"}),
             _make_text_response("I read the file."),
         ]
         messages = [{"role": "user", "content": "read a file"}]
-        result = agent.run_agent_loop(
-            mock_llm, messages, mock_console, max_tokens=64, mcp_client=mock_mcp_client
+        result = _run(mock_llm, messages, max_tokens=64, tools=mock_tools
         )
         assert result == "I read the file."
-        mock_mcp_client.call_tool.assert_called_once_with("read_file", {"path": "x.py"})
+        mock_tools.call_tool.assert_called_once_with("read_file", {"path": "x.py"})
 
-    def test_tool_result_appended_to_messages(self, mock_llm, mock_mcp_client, mock_console):
-        mock_mcp_client.call_tool.return_value = "file contents here"
+    def test_tool_result_appended_to_messages(self, mock_llm, mock_tools):
+        mock_tools.call_tool.return_value = "file contents here"
         mock_llm.create_chat_completion.side_effect = [
             _make_tool_call_response("read_file", {"path": "x.py"}),
             _make_text_response("Summary."),
         ]
         messages = [{"role": "user", "content": "q"}]
-        agent.run_agent_loop(
-            mock_llm, messages, mock_console, max_tokens=64, mcp_client=mock_mcp_client
+        _run(mock_llm, messages, max_tokens=64, tools=mock_tools
         )
         tool_msgs = [m for m in messages if m.get("role") == "tool"]
         assert any("file contents here" in m["content"] for m in tool_msgs)
 
-    def test_empty_tool_result_replaced_with_placeholder(self, mock_llm, mock_mcp_client, mock_console):
-        mock_mcp_client.call_tool.return_value = ""
+    def test_empty_tool_result_replaced_with_placeholder(self, mock_llm, mock_tools):
+        mock_tools.call_tool.return_value = ""
         mock_llm.create_chat_completion.side_effect = [
             _make_tool_call_response("list_directory", {"path": "."}),
             _make_text_response("Done."),
         ]
         messages = [{"role": "user", "content": "q"}]
-        agent.run_agent_loop(
-            mock_llm, messages, mock_console, max_tokens=64, mcp_client=mock_mcp_client
+        _run(mock_llm, messages, max_tokens=64, tools=mock_tools
         )
         tool_msgs = [m for m in messages if m.get("role") == "tool"]
         assert any("(empty result)" in m["content"] for m in tool_msgs)
 
-    def test_mcp_not_connected_returns_error_in_tool_msg(self, mock_llm, mock_console):
+    def test_unknown_tool_returns_error_in_tool_msg(self, mock_llm):
         disconnected = MagicMock()
-        disconnected.is_connected = False
         disconnected.get_openai_tool_schemas.return_value = []
         mock_llm.create_chat_completion.side_effect = [
             _make_tool_call_response("read_file", {"path": "x.py"}),
             _make_text_response("Fallback."),
         ]
         messages = [{"role": "user", "content": "q"}]
-        agent.run_agent_loop(
-            mock_llm, messages, mock_console, max_tokens=64, mcp_client=disconnected
+        _run(mock_llm, messages, max_tokens=64, tools=disconnected
         )
         tool_msgs = [m for m in messages if m.get("role") == "tool"]
         assert any(json.loads(m["content"])["error_code"] == "invalid_arguments" for m in tool_msgs)
 
-    def test_inline_tool_call_fallback_parsed(self, mock_llm, mock_mcp_client, mock_console):
+    def test_inline_tool_call_fallback_parsed(self, mock_llm, mock_tools):
         """If the LLM embeds the tool call in content instead of tool_calls, it is parsed."""
         inline_content = '```json\n{"name": "list_directory", "arguments": {"path": "."}}\n```'
         inline_response = {
@@ -253,13 +216,12 @@ class TestRunAgentLoop:
             _make_text_response("Done via inline."),
         ]
         messages = [{"role": "user", "content": "q"}]
-        result = agent.run_agent_loop(
-            mock_llm, messages, mock_console, max_tokens=64, mcp_client=mock_mcp_client, inline_tool_calls=True
+        result = _run(mock_llm, messages, max_tokens=64, tools=mock_tools, inline_tool_calls=True
         )
         assert result == "Done via inline."
-        mock_mcp_client.call_tool.assert_called_once()
+        mock_tools.call_tool.assert_called_once()
 
-    def test_forces_final_answer_after_max_iterations(self, mock_console):
+    def test_forces_final_answer_after_max_iterations(self):
         """When every iteration produces a tool call, the loop forces a final answer."""
         llm = MagicMock()
 
@@ -272,20 +234,18 @@ class TestRunAgentLoop:
         llm.create_chat_completion.side_effect = always_tool_call
 
         client = MagicMock()
-        client.is_connected = True
         client.get_openai_tool_schemas.return_value = [
             {"type": "function", "function": {"name": "list_directory"}}
         ]
         client.call_tool.return_value = "some result"
 
         messages = [{"role": "user", "content": "q"}]
-        result = agent.run_agent_loop(
-            llm, messages, mock_console, max_tokens=64, mcp_client=client
+        result = _run(llm, messages, max_tokens=64, tools=client
         )
         assert "no observable progress" in result.lower()
         assert llm.create_chat_completion.call_count == 6
 
-    def test_nudge_sent_on_empty_response(self, mock_llm, mock_console):
+    def test_nudge_sent_on_empty_response(self, mock_llm):
         """Empty content + no tool calls causes a nudge message to be appended."""
         empty_response = {
             "choices": [
@@ -300,11 +260,11 @@ class TestRunAgentLoop:
             _make_text_response("Here it is."),
         ]
         messages = [{"role": "user", "content": "q"}]
-        agent.run_agent_loop(mock_llm, messages, mock_console, max_tokens=64)
+        _run(mock_llm, messages, max_tokens=64)
         nudge_msgs = [m for m in messages if m.get("role") == "user" and "must respond" in m.get("content", "")]
         assert nudge_msgs
 
-    def test_tool_args_as_dict_parsed_correctly(self, mock_llm, mock_mcp_client, mock_console):
+    def test_tool_args_as_dict_parsed_correctly(self, mock_llm, mock_tools):
         """Tool arguments that arrive as a dict (not a JSON string) are handled."""
         tool_call = {
             "id": "call_dict",
@@ -331,31 +291,30 @@ class TestRunAgentLoop:
             _make_text_response("Done."),
         ]
         messages = [{"role": "user", "content": "q"}]
-        result = agent.run_agent_loop(
-            mock_llm, messages, mock_console, max_tokens=64, mcp_client=mock_mcp_client
+        result = _run(mock_llm, messages, max_tokens=64, tools=mock_tools
         )
         assert result == "Done."
-        mock_mcp_client.call_tool.assert_called_once_with("read_file", {"path": "x.py"})
+        mock_tools.call_tool.assert_called_once_with("read_file", {"path": "x.py"})
 
 
-def test_json_example_is_never_executed_by_default(mock_llm, mock_mcp_client):
+def test_json_example_is_never_executed_by_default(mock_llm, mock_tools):
     text = '```json\n{"name":"read_file","arguments":{"path":"x"}}\n```'
     mock_llm.create_chat_completion.return_value = _make_text_response(text)
-    result = agent.run_agent(mock_llm, [], mcp_client=mock_mcp_client)
+    result = agent.run_agent(mock_llm, [], tools=mock_tools)
     assert result.status == 'completed' and result.text == text
-    mock_mcp_client.call_tool.assert_not_called()
+    mock_tools.call_tool.assert_not_called()
 
 
-def test_invalid_call_recovery_and_repeated_failure(mock_llm, mock_mcp_client):
+def test_invalid_call_recovery_and_repeated_failure(mock_llm, mock_tools):
     bad = _make_tool_call_response('read_file', {})
     bad['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = '{broken'
     mock_llm.create_chat_completion.side_effect = [bad, bad, bad]
-    result = agent.run_agent(mock_llm, [], mcp_client=mock_mcp_client)
+    result = agent.run_agent(mock_llm, [], tools=mock_tools)
     assert result.status == 'blocked' and result.reason == 'repeated_tool_failure'
-    mock_mcp_client.call_tool.assert_not_called()
+    mock_tools.call_tool.assert_not_called()
 
 
-def test_cancelled_and_truncated_calls_do_not_execute(mock_llm, mock_mcp_client):
+def test_cancelled_and_truncated_calls_do_not_execute(mock_llm, mock_tools):
     import threading
     cancel = threading.Event()
     cancel.set()
@@ -364,18 +323,18 @@ def test_cancelled_and_truncated_calls_do_not_execute(mock_llm, mock_mcp_client)
     response = _make_tool_call_response('read_file', {'path': 'x'})
     response['choices'][0]['finish_reason'] = 'length'
     mock_llm.create_chat_completion.return_value = response
-    assert agent.run_agent(mock_llm, [], mcp_client=mock_mcp_client).status == 'budget_exhausted'
-    mock_mcp_client.call_tool.assert_not_called()
+    assert agent.run_agent(mock_llm, [], tools=mock_tools).status == 'budget_exhausted'
+    mock_tools.call_tool.assert_not_called()
 
 
-def test_truncated_tool_call_asks_for_smaller_steps_once(mock_llm, mock_mcp_client):
+def test_truncated_tool_call_asks_for_smaller_steps_once(mock_llm, mock_tools):
     truncated = _make_tool_call_response('read_file', {'path': 'x'})
     truncated['choices'][0]['finish_reason'] = 'length'
     mock_llm.create_chat_completion.side_effect = [truncated, _make_text_response('done')]
     messages = []
-    result = agent.run_agent(mock_llm, messages, max_tokens=300, mcp_client=mock_mcp_client)
+    result = agent.run_agent(mock_llm, messages, max_tokens=300, tools=mock_tools)
     assert result.status == 'completed'
-    mock_mcp_client.call_tool.assert_not_called()
+    mock_tools.call_tool.assert_not_called()
     # The cut-off call never enters the transcript; only the recovery note does.
     assert not any(m.get('tool_calls') for m in messages)
     recovery = [m for m in messages if m.get('name') == 'agent_recovery']
@@ -396,16 +355,16 @@ def test_default_output_tokens_scale_with_context(window, expected):
     assert agent.default_output_tokens(window) == expected
 
 
-def test_duplicate_reads_execute_once_per_batch_and_keep_protocol(mock_llm, mock_mcp_client):
+def test_duplicate_reads_execute_once_per_batch_and_keep_protocol(mock_llm, mock_tools):
     response = _make_tool_call_response('read_file', {'path': 'a'})
     second = json.loads(json.dumps(response['choices'][0]['message']['tool_calls'][0]))
     second['id'] = 'second'
     response['choices'][0]['message']['tool_calls'].append(second)
-    mock_mcp_client.call_tool.return_value = 'observed contents'
+    mock_tools.call_tool.return_value = 'observed contents'
     mock_llm.create_chat_completion.side_effect = [response, _make_text_response('done')]
     messages = []
-    result = agent.run_agent(mock_llm, messages, mcp_client=mock_mcp_client)
+    result = agent.run_agent(mock_llm, messages, tools=mock_tools)
     assert result.status == 'completed'
-    mock_mcp_client.call_tool.assert_called_once()
+    mock_tools.call_tool.assert_called_once()
     outputs = [m for m in messages if m['role'] == 'tool']
     assert len(outputs) == 2 and 'Unchanged observation' in outputs[1]['content']

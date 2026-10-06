@@ -1,14 +1,11 @@
-import json
 import threading
 import time
 from unittest.mock import MagicMock
 
-from agent import run_agent
 from execution_context import ExecutionContext
 from tool_recovery import execute_with_recovery, ProgressTracker
-from tool_registry import ToolSpec
 from tool_result import ToolResult
-from workspace_tools import WorkspaceTools, schema
+from workspace_tools import WorkspaceTools
 
 
 def test_transient_read_retries_but_commands_do_not(tmp_path):

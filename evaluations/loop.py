@@ -3,7 +3,6 @@ from collections import deque
 from dataclasses import replace
 import json
 from pathlib import Path
-import sys
 import tempfile
 import threading
 import time

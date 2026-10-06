@@ -2,7 +2,6 @@
 """Run disposable coding evaluations. Scripted runs test mechanics, not model ability."""
 import argparse
 from collections import deque
-from dataclasses import asdict
 import hashlib
 import json
 import re

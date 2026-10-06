@@ -3,7 +3,7 @@ import threading
 from unittest.mock import MagicMock
 
 from agent import run_agent
-from workspace_tools import WorkspaceTools, schema, STRING
+from workspace_tools import WorkspaceTools, schema
 from tool_registry import ToolSpec
 
 
@@ -27,7 +27,7 @@ def test_independent_reads_overlap_but_results_keep_call_order(tmp_path):
     model = MagicMock()
     model.create_chat_completion.side_effect = responses(['first', 'second'])
     messages=[]
-    assert run_agent(model, messages, mcp_client=tools, tool_workers=2).status == 'completed'
+    assert run_agent(model, messages, tools=tools, tool_workers=2).status == 'completed'
     assert [json.loads(m['content'])['data'] for m in messages if m['role']=='tool'] == ['first','second']
 
 
@@ -43,7 +43,7 @@ def test_mutation_is_a_barrier_and_duplicate_reads_share_one_execution(tmp_path)
     tools.registry.register(ToolSpec(schema('change', 'Change', {}), change, minimum_mode='workspace-edit', side_effects='filesystem'))
     model=MagicMock();model.create_chat_completion.side_effect=responses(['observe','observe','change','observe'])
     messages=[]
-    assert run_agent(model,messages,mcp_client=tools).status=='completed'
+    assert run_agent(model,messages,tools=tools).status=='completed'
     assert read.call_count==2
     assert [json.loads(m['content'])['data'] for m in messages if m['role']=='tool']==['old','old','edited','new']
 
@@ -65,11 +65,11 @@ def test_worker_limit_and_serial_unknown_tools(tmp_path):
     for i in range(4):
         tools.registry.register(ToolSpec(schema(f'read{i}', 'Read', {}),read,side_effects='none',concurrency='parallel'))
     model=MagicMock();model.create_chat_completion.side_effect=responses([f'read{i}' for i in range(4)])
-    assert run_agent(model,[],mcp_client=tools,tool_workers=2).status=='completed'
+    assert run_agent(model,[],tools=tools,tool_workers=2).status=='completed'
     assert peak==2
     ordered=[]
     for name in ('a','b'):
         tools.registry.register(ToolSpec(schema(name,name,{}),lambda args,name=name:ordered.append(name) or name))
     model.create_chat_completion.side_effect=responses(['a','b'])
-    assert run_agent(model,[],mcp_client=tools).status=='completed'
+    assert run_agent(model,[],tools=tools).status=='completed'
     assert ordered==['a','b']

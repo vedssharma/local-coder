@@ -17,7 +17,7 @@ The host explicitly selects `LOCAL_CODER_PERMISSION_MODE` at launch: `read-only`
 - `get_model()`: inspect non-secret model configuration.
 - `set_model(path)`: configure a workspace-local GGUF when the server allows it.
 
-Coding responses contain `status`, `text`, and `session_id`. Check status before using the response. `completed` denotes a completed model turn; inspect actual test results before claiming changes work. Preserve `session_id` to continue work, including after server restart. Inline JSON examples are never automatically executed as tool calls.
+Coding responses contain `status`, `text`, and `session_id`. Check status before using the response. `completed` denotes a completed model turn; inspect actual test results before claiming changes work. Preserve `session_id` to continue work, including after server restart. Models configured without native tool calling use tools through `<tool_call>` blocks, so for those models a reply containing such a block (or a fenced JSON block with `name` and `arguments`) is executed as a tool call.
 
 File references in `@path` form and explicit `files` are confined to the workspace. Embedded inference stays local; a server backend sends context to its configured endpoint.
 

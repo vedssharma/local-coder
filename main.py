@@ -1,10 +1,8 @@
-from prompt_builder import build_messages, build_edit_system_message, build_user_message
 from helpers import parse_file_references
-from agent import run_agent_loop
+from agent import RunBudget, run_agent
 from workspace_tools import WorkspaceTools, MODES
 from runtime import Runtime
-from model_backend import create_model, EmbeddedModel, import_llama
-from agent import RunBudget
+from model_backend import create_model
 import config
 import os
 import glob
@@ -30,20 +28,24 @@ def handle_model_command():
     """Handle the /model slash command: show current model and optionally switch."""
     global llm
     current_config = config.get_model_config()
-    model_path = current_config["model_path"]
-    typer.echo(f"\nCurrent model: {os.path.basename(model_path)}")
-    typer.echo(f"  Path: {model_path}")
+    model_path = current_config.get("model_path") or ""
+    if current_config.get("backend") == "openai":
+        where = current_config.get("provider") or current_config.get("base_url", "http://127.0.0.1:8080/v1")
+        typer.echo(f"\nCurrent model: {current_config.get('model', 'local-model')} via {where}")
+    else:
+        typer.echo(f"\nCurrent model: {os.path.basename(model_path)}")
+        typer.echo(f"  Path: {model_path}")
 
     # Find available .gguf files in the current directory
     gguf_files = sorted(glob.glob("./*.gguf"))
     other_files = [f for f in gguf_files if os.path.abspath(f) != os.path.abspath(model_path)]
 
     if other_files:
-        typer.echo(f"\nAvailable GGUF models in current directory:")
+        typer.echo("\nAvailable GGUF models in current directory:")
         for i, f in enumerate(other_files, 1):
             typer.echo(f"  {i}. {os.path.basename(f)}")
 
-    typer.echo(f"\nEnter a path to a .gguf file to switch models, 'api' to use a hosted model (OpenAI, Anthropic, Gemini, ...), or press Enter to keep the current model:")
+    typer.echo("\nEnter a path to a .gguf file to switch models, 'api' to use a hosted model (OpenAI, Anthropic, Gemini, ...), or press Enter to keep the current model:")
     new_path = input("> ").strip()
 
     if new_path.lower() == 'api':
@@ -81,20 +83,20 @@ def handle_model_command():
         typer.echo(f"Error: Not a .gguf file: {new_path}\n")
         return
 
-    typer.echo(f"Loading model: {new_path}...")
     try:
+        # Check the file header instead of loading the whole model; it loads on the next request.
+        with open(new_path, 'rb') as f:
+            if f.read(4) != b'GGUF':
+                typer.echo(f"Error: Not a GGUF model file: {new_path}\n")
+                return
         import providers
         abs_path = os.path.abspath(new_path)
-        profile = providers.local_profile({**current_config, 'model_path': abs_path})
-        loaded = import_llama().Llama(model_path=abs_path, n_ctx=profile['n_ctx'], n_gpu_layers=profile['n_gpu_layers'], verbose=False)
         config.set_model_path(abs_path)
-        profile = providers.local_profile(config.get_model_config())
-        config.update_model_config(profile)
-        llm = EmbeddedModel(profile)
-        llm._model = loaded
+        config.update_model_config(providers.local_profile(config.get_model_config()))
+        llm = None
         typer.echo(f"Switched to: {os.path.basename(abs_path)}\n")
-    except Exception as e:
-        typer.echo(f"Error loading model: {e}\n")
+    except (OSError, ValueError) as e:
+        typer.echo(f"Error switching model: {e}\n")
 
 
 def _gather_project_context():
@@ -177,12 +179,10 @@ def handle_md_command(console, max_tokens):
     ]
 
     typer.echo("Generating CONTEXT.md content...\n")
-    md_content = run_agent_loop(
-        llm=get_llm(),
-        messages=generate_messages,
-        console=console,
-        max_tokens=md_max_tokens
-    )
+    result = run_agent(get_llm(), generate_messages, max_tokens=md_max_tokens)
+    if result.status != 'completed':
+        console.print(f'[{result.status}] {result.text}', markup=False)
+    md_content = result.text
 
     if not md_content or not md_content.strip():
         typer.echo("Failed to generate CONTEXT.md content.\n")
@@ -203,7 +203,7 @@ def handle_md_command(console, max_tokens):
         typer.echo("Write cancelled.\n")
 
 
-def make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, task_kind="auto", persistent=False, profile_name=None, route=False, tool_workers=4):
+def make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, task_kind="auto", persistent=False, profile_name=None, route=False, tool_workers=4, web=None):
     if mode not in MODES:
         raise typer.BadParameter('mode must be read-only, workspace-edit, or execute')
     streamed = False
@@ -232,16 +232,32 @@ def make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, tas
     if persistent:
         from inference_daemon import PersistentModel
         model = PersistentModel(selected, config.CONFIG_DIR)
-    return Runtime(model, os.getcwd(), config.CONFIG_DIR, mode=mode,
+    runtime = Runtime(model, os.getcwd(), config.CONFIG_DIR, mode=mode,
         emit=emit,
         budget=RunBudget(max_steps, max_seconds, token_budget),
         context_window=selected['n_ctx'], trace=trace, task_kind=task_kind,
-        tool_workers=tool_workers)
+        tool_workers=tool_workers, web=config.web_enabled(selected, web), retention=config.retention())
+    runtime.profile = selected
+    return runtime
+
+
+def format_sessions(summaries):
+    if not summaries:
+        return 'No saved sessions for this workspace.'
+    import time
+    return '\n'.join(f"{s['id']}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(s['modified']))}  "
+                     f"{(s['prompt'][:57] + '...') if len(s['prompt']) > 60 else s['prompt']}" for s in summaries)
 
 
 def execute_turn(runtime, prompt, max_tokens):
     original, files = parse_file_references(prompt, root=runtime.tools.root)
     result = runtime.turn(original, files, max_tokens)
+    profile = getattr(runtime, 'profile', {})
+    if profile.get('provider') or profile.get('price'):
+        import providers
+        usage = providers.describe_usage(profile, result.performance)
+        if usage:
+            typer.echo(usage)
     typer.echo(f'Session: {runtime.session_id}; outcome: {result.status}')
     if result.status != 'completed':
         typer.echo(result.text)
@@ -262,9 +278,10 @@ def ask(
     profile_name: str = typer.Option(None, '--profile'),
     route: bool = typer.Option(False, '--route', help='Opt in to configured task-kind routing'),
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
+    web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch for this run (default: the profile setting)'),
 ):
     """Ask a question or run a bounded coding task."""
-    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, tool_workers) as runtime:
+    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, tool_workers, web) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
@@ -284,10 +301,11 @@ def chat(
     profile_name: str = typer.Option(None, '--profile'),
     route: bool = typer.Option(False, '--route', help='Opt in to configured task-kind routing'),
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
+    web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch for this run (default: the profile setting)'),
 ):
-    """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /exit."""
+    """Chat with persistent tool history; /resume ID, /sessions, /new, /undo, /undo turn, /exit."""
     console = Console()
-    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent, profile_name, route, tool_workers) as runtime:
+    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, task_kind, persistent, profile_name, route, tool_workers, web) as runtime:
         if resume:
             runtime.resume(resume)
         while True:
@@ -296,13 +314,15 @@ def chat(
                 if prompt == '/exit':
                     break
                 if prompt == '/sessions':
-                    typer.echo('\n'.join(runtime.store.list()) or 'No saved sessions.')
+                    typer.echo(format_sessions(runtime.store.summaries()))
                 elif prompt.startswith('/resume '):
                     runtime.resume(prompt.split(maxsplit=1)[1])
                 elif prompt == '/new':
                     runtime.new()
                 elif prompt == '/undo':
                     typer.echo(runtime.tools.undo_last())
+                elif prompt == '/undo turn':
+                    typer.echo(runtime.tools.undo_turn())
                 elif prompt == '/acknowledge-interrupted':
                     runtime.acknowledge_interrupted()
                     typer.echo('Interrupted operations acknowledged; completed calls will not be replayed.')
@@ -335,19 +355,38 @@ def edit(
     profile_name: str = typer.Option(None, '--profile'),
     route: bool = typer.Option(False, '--route', help='Opt in to configured task-kind routing'),
     tool_workers: int = typer.Option(4, '--tool-workers', min=1, max=8, help='Maximum concurrent independent read tools'),
+    web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch for this run (default: the profile setting)'),
 ):
     """Apply targeted edits; --mode execute also permits validation commands."""
-    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, tool_workers) as runtime:
+    with make_runtime(mode, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, tool_workers, web) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
         raise typer.Exit(1)
 
 
 @app.command()
-def undo():
-    """Undo the most recent harness patch if the file has not changed since."""
+def clean(
+    older_than: float = typer.Option(None, '--older-than', min=0, help='Remove state older than this many days (default: the retention settings)'),
+    dry_run: bool = typer.Option(False, '--dry-run', help='Show what would be removed'),
+):
+    """Remove old undo records, artifacts and traces in this workspace, and its old sessions."""
+    import housekeeping
+    from session import SessionStore
     try:
-        typer.echo(WorkspaceTools(mode='workspace-edit').undo_last())
+        days = {kind: older_than for kind in housekeeping.DEFAULT_RETENTION} if older_than is not None else config.retention()
+        store = SessionStore(config.CONFIG_DIR / 'sessions', os.getcwd())
+        typer.echo(housekeeping.describe(housekeeping.prune(os.getcwd(), store, days, dry_run), dry_run))
+    except (OSError, ValueError) as exc:
+        typer.echo(f'Cannot clean: {exc}', err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
+def undo(turn: bool = typer.Option(False, '--turn', help='Undo every patch from the most recent turn')):
+    """Undo the most recent harness patch, or the whole last turn, if the files have not changed since."""
+    try:
+        tools = WorkspaceTools(mode='workspace-edit')
+        typer.echo(tools.undo_turn() if turn else tools.undo_last())
     except (OSError, ValueError) as exc:
         typer.echo(f'Cannot undo: {exc}', err=True)
         raise typer.Exit(1)
@@ -379,6 +418,10 @@ def models(
     draft_gpu_layers: int = typer.Option(None, '--draft-gpu-layers', min=-1),
     provider: str = typer.Option(None, '--provider', help='Hosted provider: ' + ', '.join(__import__('providers').PROVIDERS)),
     api_key: bool = typer.Option(False, '--api-key', help='Prompt for the provider API key (stored privately)'),
+    web: bool = typer.Option(None, '--web/--no-web', help='Offer web_search and web_fetch (default: on for hosted providers, off otherwise)'),
+    price_input: float = typer.Option(None, '--price-input', min=0, help='USD per million input tokens, for cost estimates'),
+    price_output: float = typer.Option(None, '--price-output', min=0, help='USD per million output tokens'),
+    price_cached: float = typer.Option(None, '--price-cached', min=0, help='USD per million cached input tokens (default: the input price)'),
 ):
     """Show current model or set a new model."""
     global llm
@@ -391,8 +434,14 @@ def models(
                'prompt_cache_mb': prompt_cache_mb, 'server_cache_prompt': server_cache_prompt,
                'speculative_mode': speculative_mode, 'draft_model_path': draft_model_path,
                'draft_tokens': draft_tokens, 'draft_ngram_size': draft_ngram_size,
-               'draft_n_gpu_layers': draft_gpu_layers}
+               'draft_n_gpu_layers': draft_gpu_layers, 'web': web}
     updates = {k: v for k, v in updates.items() if v is not None}
+    prices = {k: v for k, v in {'input': price_input, 'output': price_output, 'cached_input': price_cached}.items()
+              if v is not None}
+    if prices:
+        updates['price'] = {**(config.get_model_config().get('price') or {}), **prices}
+    elif provider and provider != config.get_model_config().get('provider'):
+        updates['price'] = None  # Another provider's prices would be wrong.
     if provider:
         import providers
         if provider not in providers.PROVIDERS:
@@ -431,7 +480,7 @@ def models(
             raise typer.Exit(1)
 
         if not set_model.lower().endswith('.gguf'):
-            typer.echo(f"Error: Model file must be a .gguf file", err=True)
+            typer.echo("Error: Model file must be a .gguf file", err=True)
             raise typer.Exit(1)
 
         # Get absolute path
@@ -443,16 +492,16 @@ def models(
             profile = providers.local_profile(config.get_model_config(), keep_context=context_window is not None)
             config.update_model_config(profile)
             llm = None
-            typer.echo(f"✓ Model updated successfully!")
+            typer.echo("✓ Model updated successfully!")
             typer.echo(f"  New model: {abs_path}")
-            typer.echo(f"\nNote: Restart the application for the change to take effect.")
+            typer.echo("\nNote: Restart the application for the change to take effect.")
         else:
-            typer.echo(f"Error: Failed to update model configuration", err=True)
+            typer.echo("Error: Failed to update model configuration", err=True)
             raise typer.Exit(1)
     else:
         # Show current model
         current_config = config.get_model_config()
-        model_path = current_config["model_path"]
+        model_path = current_config.get("model_path") or ""
 
         typer.echo("Current Model Configuration:")
         typer.echo(f"  Backend: {current_config['backend']}")
@@ -463,17 +512,22 @@ def models(
                 import providers
                 typer.echo(f"  Provider: {current_config['provider']} (API key: "
                            f"{'set' if providers.resolve_key(current_config) else 'missing'})")
-        typer.echo(f"  Model path: {model_path}")
-        typer.echo(f"  Context size: {current_config['n_ctx']}")
-        typer.echo(f"  GPU layers: {current_config['n_gpu_layers']}")
-
-        # Check if model file exists
-        if os.path.exists(model_path):
-            file_size = os.path.getsize(model_path) / (1024 * 1024 * 1024)  # Convert to GB
-            typer.echo(f"  File size: {file_size:.2f} GB")
-            typer.echo(f"  Status: ✓ Available")
         else:
-            typer.echo(f"  Status: ✗ Not found")
+            typer.echo(f"  Model path: {model_path}")
+        typer.echo(f"  Context size: {current_config['n_ctx']}")
+        typer.echo(f"  Web tools: {'on' if config.web_enabled(current_config) else 'off'}")
+        price = current_config.get('price') or {}
+        if price.get('input') is not None and price.get('output') is not None:
+            typer.echo(f"  Price per million tokens: ${price['input']:g} input, ${price['output']:g} output"
+                       + (f", ${price['cached_input']:g} cached" if price.get('cached_input') is not None else ''))
+        if current_config['backend'] != 'openai':
+            typer.echo(f"  GPU layers: {current_config['n_gpu_layers']}")
+            if os.path.exists(model_path):
+                file_size = os.path.getsize(model_path) / (1024 * 1024 * 1024)  # Convert to GB
+                typer.echo(f"  File size: {file_size:.2f} GB")
+                typer.echo("  Status: ✓ Available")
+            else:
+                typer.echo("  Status: ✗ Not found")
 
 
 @app.command()

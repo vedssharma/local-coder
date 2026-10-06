@@ -1,11 +1,13 @@
 """UI-independent sessions, model execution, events, and cleanup."""
 from dataclasses import asdict
+import uuid
 import json
 from pathlib import Path
 import threading
 import time
 
 from agent import run_agent, RunBudget, default_output_tokens
+import housekeeping
 from model_backend import ModelAdapter
 from prompt_builder import build_messages
 from session import ContextManager, SessionStore
@@ -19,14 +21,19 @@ from verification import VerificationLedger
 class Runtime:
     def __init__(self, model, workspace, state_dir, mode='read-only',
                  emit=None, budget=None, context_window=8192, trace=False, task_kind="auto",
-                 tool_workers=4):
+                 tool_workers=4, web=True, retention=None):
         if type(tool_workers) is not int or not 1 <= tool_workers <= 8:
             raise ValueError('tool_workers must be between 1 and 8')
         self.tool_workers = tool_workers
         self._emit_lock = threading.RLock()
         self.model = model
-        self.tools = WorkspaceTools(workspace, mode=mode)
+        self.tools = WorkspaceTools(workspace, mode=mode, web=web)
         self.store = SessionStore(Path(state_dir) / 'sessions', workspace)
+        if retention is not None:
+            try:
+                housekeeping.prune(self.tools.root, self.store, retention)
+            except (OSError, ValueError):
+                pass  # Housekeeping never blocks a run; `local-coder clean` reports problems.
         self.context = ContextManager(context_window,
             count_tokens=model.count_tokens if isinstance(model, ModelAdapter) else None,
             artifact_dir=self.tools.path('.local-coder/artifacts'))
@@ -118,6 +125,7 @@ class Runtime:
             raise ValueError('max_tokens must be positive')
         self.max_tokens = max_tokens
         self.cancel_event.clear()
+        self.tools.turn_id = uuid.uuid4().hex
         history = [m for m in self.messages if m.get('role') != 'system' or m.get('name') == 'working_memory']
         file_contents = file_contents or {}
         fresh, reused = {}, []
@@ -129,7 +137,7 @@ class Runtime:
                 fresh[name] = content
         if reused:
             prompt += '\nUnchanged file context retained earlier in this transcript: ' + ', '.join(reused)
-        self.messages = build_messages(prompt, fresh, history=history, root=self.tools.root)
+        self.messages = build_messages(prompt, fresh, history=history, root=self.tools.root, tools=self.tools.tool_names)
         self.session_id = self.store.save(self.messages, self.session_id,self.checkpoint)
         if isinstance(self.model, ModelAdapter):
             self.model.emit = self.emit

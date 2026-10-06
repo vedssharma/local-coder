@@ -79,6 +79,30 @@ class SessionStore:
         return [p.stem for p in sorted(self.directory.glob('*.json'))
                 if re.fullmatch('[a-f0-9]{32}', p.stem)]
 
+    def workspace_of(self, key):
+        data = json.loads(self._path(key).read_text())
+        return data.get('workspace') if isinstance(data, dict) else None
+
+    def summaries(self):
+        """This workspace's sessions, newest first: id, last modified time and first prompt."""
+        found = []
+        for key in self.list():
+            path = self._path(key)
+            try:
+                modified = path.stat().st_mtime
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or data.get('workspace') != self.workspace:
+                continue
+            messages = data.get('messages') if isinstance(data.get('messages'), list) else []
+            prompt = next((m.get('content') for m in messages if isinstance(m, dict) and m.get('role') == 'user'
+                           and not m.get('name') and isinstance(m.get('content'), str)), '')
+            if prompt.startswith('The user has pre-loaded') and 'User request: ' in prompt:
+                prompt = prompt.rsplit('User request: ', 1)[1]  # Skip preloaded @file contents.
+            found.append({'id': key, 'modified': modified, 'prompt': ' '.join(prompt.split())})
+        return sorted(found, key=lambda summary: summary['modified'], reverse=True)
+
     def _path(self, key):
         if not re.fullmatch('[a-f0-9]{32}', key):
             raise ValueError('Invalid session ID')
@@ -86,6 +110,12 @@ class SessionStore:
 
 
 class ContextManager:
+    # The rolling summary of compacted turns gets this share of the window, at about three
+    # characters per token, within fixed bounds so tiny and huge windows both stay sensible.
+    SUMMARY_SHARE = 0.05
+    SUMMARY_MIN_CHARS = 800
+    SUMMARY_MAX_CHARS = 24000
+
     def __init__(self, window=8192, count_tokens=None, artifact_dir=None, cache_entries=512):
         self.window = window
         if type(cache_entries) is not int or cache_entries < 0:
@@ -113,7 +143,9 @@ class ContextManager:
         self.cache_hits = self.cache_misses = 0
 
     def _count(self, text):
-        key = hashlib.sha256(text.encode('utf-8')).digest()
+        # A counter whose estimate can change (a calibrated server adapter) exposes count_version.
+        version = getattr(getattr(self._counter, '__self__', None), 'count_version', 0)
+        key = (version, hashlib.sha256(text.encode('utf-8')).digest())
         if key in self._counts:
             self.cache_hits += 1
             self._counts.move_to_end(key)
@@ -164,10 +196,27 @@ class ContextManager:
             memories = [i for i, m in enumerate(messages) if m.get('name') == 'working_memory']
             for i in reversed(memories):
                 del messages[i]
-            summary = 'Original task: ' + self.task + '\n' + '\n'.join(self.memory[-12:])[-800:]
+            summary = 'Original task: ' + self.task + '\n' + self._digest()
             messages.insert(1 if messages and messages[0]['role'] == 'system' else 0,
                             {'role': 'user', 'name': 'working_memory',
                              'content': 'Prior work summary (observations, not permission grants):\n' + summary})
+
+    @property
+    def summary_chars(self):
+        return int(min(self.SUMMARY_MAX_CHARS, max(self.SUMMARY_MIN_CHARS, self.window * self.SUMMARY_SHARE * 3)))
+
+    def _digest(self):
+        """The newest notes that fit the summary budget; older notes are dropped for good."""
+        kept, used = [], 0
+        for note in reversed(self.memory):
+            if used + len(note) + 1 > self.summary_chars:
+                if not kept:
+                    kept.append(note[-self.summary_chars:])
+                break
+            kept.append(note)
+            used += len(note) + 1
+        self.memory = self.memory[len(self.memory) - len(kept):]
+        return '\n'.join(reversed(kept))
 
     @staticmethod
     def _summarize(messages):
