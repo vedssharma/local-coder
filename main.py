@@ -236,7 +236,15 @@ def make_runtime(mode, max_steps, max_seconds, token_budget, trace, console, tas
         emit=emit,
         budget=RunBudget(max_steps, max_seconds, token_budget),
         context_window=selected['n_ctx'], trace=trace, task_kind=task_kind,
-        tool_workers=tool_workers, web=config.web_enabled(selected, web))
+        tool_workers=tool_workers, web=config.web_enabled(selected, web), retention=config.retention())
+
+
+def format_sessions(summaries):
+    if not summaries:
+        return 'No saved sessions for this workspace.'
+    import time
+    return '\n'.join(f"{s['id']}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(s['modified']))}  "
+                     f"{(s['prompt'][:57] + '...') if len(s['prompt']) > 60 else s['prompt']}" for s in summaries)
 
 
 def execute_turn(runtime, prompt, max_tokens):
@@ -298,7 +306,7 @@ def chat(
                 if prompt == '/exit':
                     break
                 if prompt == '/sessions':
-                    typer.echo('\n'.join(runtime.store.list()) or 'No saved sessions.')
+                    typer.echo(format_sessions(runtime.store.summaries()))
                 elif prompt.startswith('/resume '):
                     runtime.resume(prompt.split(maxsplit=1)[1])
                 elif prompt == '/new':
@@ -345,6 +353,23 @@ def edit(
     with make_runtime(mode, max_steps, max_seconds, token_budget, trace, Console(), task_kind, persistent, profile_name, route, tool_workers, web) as runtime:
         result = execute_turn(runtime, prompt, max_tokens)
     if result.status != 'completed':
+        raise typer.Exit(1)
+
+
+@app.command()
+def clean(
+    older_than: float = typer.Option(None, '--older-than', min=0, help='Remove state older than this many days (default: the retention settings)'),
+    dry_run: bool = typer.Option(False, '--dry-run', help='Show what would be removed'),
+):
+    """Remove old undo records, artifacts and traces in this workspace, and its old sessions."""
+    import housekeeping
+    from session import SessionStore
+    try:
+        days = {kind: older_than for kind in housekeeping.DEFAULT_RETENTION} if older_than is not None else config.retention()
+        store = SessionStore(config.CONFIG_DIR / 'sessions', os.getcwd())
+        typer.echo(housekeeping.describe(housekeeping.prune(os.getcwd(), store, days, dry_run), dry_run))
+    except (OSError, ValueError) as exc:
+        typer.echo(f'Cannot clean: {exc}', err=True)
         raise typer.Exit(1)
 
 

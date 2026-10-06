@@ -70,7 +70,8 @@ def run_turn(prompt, files=None, session_id=None, max_tokens=None, profile_name=
                      mode=os.environ.get('LOCAL_CODER_PERMISSION_MODE', 'read-only'), budget=_budget(),
                      context_window=config.get_model_config(profile_name)['n_ctx'],
                      tool_workers=int(os.environ.get('LOCAL_CODER_TOOL_WORKERS', '4')),
-                     web=config.web_enabled(config.get_model_config(profile_name), _env_flag('LOCAL_CODER_WEB'))) as runtime:
+                     web=config.web_enabled(config.get_model_config(profile_name), _env_flag('LOCAL_CODER_WEB')),
+                     retention=config.retention()) as runtime:
             if session_id:
                 runtime.resume(session_id)
             original, contents = parse_file_references(prompt, root=runtime.tools.root)

@@ -19,6 +19,13 @@ DEFAULT_CONFIG = {
 }
 
 
+def retention(cfg=None) -> dict:
+    """Days to keep undo records, artifacts, traces and sessions; config.json's "retention" overrides."""
+    import housekeeping
+    cfg = load_config() if cfg is None else cfg
+    return housekeeping.retention_days(cfg.get('retention'))
+
+
 def ensure_config_dir():
     """Create config directory if it doesn't exist."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)

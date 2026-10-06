@@ -7,6 +7,7 @@ import threading
 import time
 
 from agent import run_agent, RunBudget, default_output_tokens
+import housekeeping
 from model_backend import ModelAdapter
 from prompt_builder import build_messages
 from session import ContextManager, SessionStore
@@ -20,7 +21,7 @@ from verification import VerificationLedger
 class Runtime:
     def __init__(self, model, workspace, state_dir, mode='read-only',
                  emit=None, budget=None, context_window=8192, trace=False, task_kind="auto",
-                 tool_workers=4, web=True):
+                 tool_workers=4, web=True, retention=None):
         if type(tool_workers) is not int or not 1 <= tool_workers <= 8:
             raise ValueError('tool_workers must be between 1 and 8')
         self.tool_workers = tool_workers
@@ -28,6 +29,11 @@ class Runtime:
         self.model = model
         self.tools = WorkspaceTools(workspace, mode=mode, web=web)
         self.store = SessionStore(Path(state_dir) / 'sessions', workspace)
+        if retention is not None:
+            try:
+                housekeeping.prune(self.tools.root, self.store, retention)
+            except (OSError, ValueError):
+                pass  # Housekeeping never blocks a run; `local-coder clean` reports problems.
         self.context = ContextManager(context_window,
             count_tokens=model.count_tokens if isinstance(model, ModelAdapter) else None,
             artifact_dir=self.tools.path('.local-coder/artifacts'))

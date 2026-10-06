@@ -26,7 +26,7 @@ local-coder = "main:app"
 
 [tool.setuptools]
 py-modules = [
-    "agent", "artifact_store", "checkpoint_recovery", "config", "execution_context", "helpers",
+    "agent", "artifact_store", "checkpoint_recovery", "config", "execution_context", "helpers", "housekeeping",
     "inference_daemon", "main", "model_backend", "performance", "prompt_builder", "providers",
     "runtime", "session", "speculative", "tool_recovery", "tool_registry", "tool_result",
     "tool_scheduler", "verification", "web_tools", "workspace_tools",

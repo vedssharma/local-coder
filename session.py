@@ -79,6 +79,30 @@ class SessionStore:
         return [p.stem for p in sorted(self.directory.glob('*.json'))
                 if re.fullmatch('[a-f0-9]{32}', p.stem)]
 
+    def workspace_of(self, key):
+        data = json.loads(self._path(key).read_text())
+        return data.get('workspace') if isinstance(data, dict) else None
+
+    def summaries(self):
+        """This workspace's sessions, newest first: id, last modified time and first prompt."""
+        found = []
+        for key in self.list():
+            path = self._path(key)
+            try:
+                modified = path.stat().st_mtime
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or data.get('workspace') != self.workspace:
+                continue
+            messages = data.get('messages') if isinstance(data.get('messages'), list) else []
+            prompt = next((m.get('content') for m in messages if isinstance(m, dict) and m.get('role') == 'user'
+                           and not m.get('name') and isinstance(m.get('content'), str)), '')
+            if prompt.startswith('The user has pre-loaded') and 'User request: ' in prompt:
+                prompt = prompt.rsplit('User request: ', 1)[1]  # Skip preloaded @file contents.
+            found.append({'id': key, 'modified': modified, 'prompt': ' '.join(prompt.split())})
+        return sorted(found, key=lambda summary: summary['modified'], reverse=True)
+
     def _path(self, key):
         if not re.fullmatch('[a-f0-9]{32}', key):
             raise ValueError('Invalid session ID')
