@@ -1,4 +1,3 @@
-from prompt_builder import build_messages, build_edit_system_message, build_user_message
 from helpers import parse_file_references
 from agent import run_agent_loop
 from workspace_tools import WorkspaceTools, MODES
@@ -39,11 +38,11 @@ def handle_model_command():
     other_files = [f for f in gguf_files if os.path.abspath(f) != os.path.abspath(model_path)]
 
     if other_files:
-        typer.echo(f"\nAvailable GGUF models in current directory:")
+        typer.echo("\nAvailable GGUF models in current directory:")
         for i, f in enumerate(other_files, 1):
             typer.echo(f"  {i}. {os.path.basename(f)}")
 
-    typer.echo(f"\nEnter a path to a .gguf file to switch models, 'api' to use a hosted model (OpenAI, Anthropic, Gemini, ...), or press Enter to keep the current model:")
+    typer.echo("\nEnter a path to a .gguf file to switch models, 'api' to use a hosted model (OpenAI, Anthropic, Gemini, ...), or press Enter to keep the current model:")
     new_path = input("> ").strip()
 
     if new_path.lower() == 'api':
@@ -435,7 +434,7 @@ def models(
             raise typer.Exit(1)
 
         if not set_model.lower().endswith('.gguf'):
-            typer.echo(f"Error: Model file must be a .gguf file", err=True)
+            typer.echo("Error: Model file must be a .gguf file", err=True)
             raise typer.Exit(1)
 
         # Get absolute path
@@ -447,11 +446,11 @@ def models(
             profile = providers.local_profile(config.get_model_config(), keep_context=context_window is not None)
             config.update_model_config(profile)
             llm = None
-            typer.echo(f"✓ Model updated successfully!")
+            typer.echo("✓ Model updated successfully!")
             typer.echo(f"  New model: {abs_path}")
-            typer.echo(f"\nNote: Restart the application for the change to take effect.")
+            typer.echo("\nNote: Restart the application for the change to take effect.")
         else:
-            typer.echo(f"Error: Failed to update model configuration", err=True)
+            typer.echo("Error: Failed to update model configuration", err=True)
             raise typer.Exit(1)
     else:
         # Show current model
@@ -476,9 +475,9 @@ def models(
         if os.path.exists(model_path):
             file_size = os.path.getsize(model_path) / (1024 * 1024 * 1024)  # Convert to GB
             typer.echo(f"  File size: {file_size:.2f} GB")
-            typer.echo(f"  Status: ✓ Available")
+            typer.echo("  Status: ✓ Available")
         else:
-            typer.echo(f"  Status: ✗ Not found")
+            typer.echo("  Status: ✗ Not found")
 
 
 @app.command()

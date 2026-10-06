@@ -1,10 +1,6 @@
 """Tests for prompt_builder.py — system/user message construction."""
 
-import os
-from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 import prompt_builder
 

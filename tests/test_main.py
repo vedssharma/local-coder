@@ -1,10 +1,8 @@
 """Tests for main.py — CLI commands and helper functions."""
 
 import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 # Import the Typer app — avoid actually loading the LLM or connecting MCP

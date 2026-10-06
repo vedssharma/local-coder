@@ -148,7 +148,10 @@ The ordinary test suite validates implementation behavior without loading an LLM
 
 ```bash
 python -m pytest -q
+ruff check .
 ```
+
+CI runs both on Python 3.10, 3.11 and 3.12, plus every scripted evaluation (`--scripted --suite all`).
 
 Six disposable-repository evaluations cover navigation, a bug fix, a multi-file change, recovery from a failing check, permissions, and continuing an unfinished task after restart:
 

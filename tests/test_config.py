@@ -1,7 +1,6 @@
 """Tests for config.py — configuration loading, saving, and model path management."""
 
 import json
-from pathlib import Path
 
 import pytest
 

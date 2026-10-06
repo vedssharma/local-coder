@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -54,7 +53,6 @@ runtime.turn('append once')
             assert observation['status']=='success' and not runtime.interrupted_operations
         else:
             assert observation['error_code']=='interrupted_operation' and runtime.interrupted_operations
-            blocked=runtime.tools.registry.get('bash')
             model.create_chat_completion.side_effect=[call_response('bash',{'command':'printf x >> counter'}),answer()]
         outcome=runtime.turn('continue without replaying')
         assert outcome.status==('completed' if persist_completed else 'blocked')

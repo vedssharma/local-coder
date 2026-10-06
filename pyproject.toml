@@ -1,0 +1,6 @@
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# Errors only: syntax errors and pyflakes (unused imports and variables, undefined names).
+select = ["E9", "F"]

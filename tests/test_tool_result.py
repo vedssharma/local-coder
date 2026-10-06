@@ -1,9 +1,6 @@
 import json
-import sys
-import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
-import pytest
 
 from agent import run_agent
 from session import ContextManager

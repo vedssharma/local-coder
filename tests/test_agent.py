@@ -1,7 +1,7 @@
 """Tests for agent.py — agentic tool-calling loop and helpers."""
 
 import json
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import pytest
 

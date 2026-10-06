@@ -3,7 +3,7 @@ import threading
 from unittest.mock import MagicMock
 
 from agent import run_agent
-from workspace_tools import WorkspaceTools, schema, STRING
+from workspace_tools import WorkspaceTools, schema
 from tool_registry import ToolSpec
 
 

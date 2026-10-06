@@ -5,7 +5,6 @@ import re
 import time
 from typing import Literal
 
-from jsonschema import ValidationError
 from session import ContextManager
 from tool_result import ToolResult, invoke_tool
 from tool_registry import ToolRegistry, ToolSpec
