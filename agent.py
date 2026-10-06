@@ -50,13 +50,11 @@ class RunResult:
     verification_scope: str = 'observed_commands_and_changes'
 
 
-def _build_tool_schemas(mcp_client=None):
-    if not mcp_client or not mcp_client.is_connected:
-        return []
-    return mcp_client.get_openai_tool_schemas()
+def _build_tool_schemas(tools=None):
+    return tools.get_openai_tool_schemas() if tools else []
 
 
-def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
+def run_agent(llm, messages, max_tokens=512, tools=None, budget=None,
               cancel_event=None, emit=None, inline_tool_calls=False, context_manager=None, tool_schemas=None,
               tool_executor=None, execution_context=None, tool_workers=4, checkpoint=None, reserved_call_ids=()):
     """Run a turn. Completion means the model finished, not that its claims were verified.
@@ -68,7 +66,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
     reserved_call_ids = set(reserved_call_ids)
     budget = budget or RunBudget()
     emit = emit or (lambda event: None)
-    schemas = _build_tool_schemas(mcp_client) if tool_schemas is None else tool_schemas
+    schemas = _build_tool_schemas(tools) if tool_schemas is None else tool_schemas
     from model_backend import ModelAdapter
     schemas = sorted(schemas, key=lambda s: s['function']['name'])
     # Models without native tool calling get the tools described in the prompt and reply with
@@ -77,7 +75,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         inline_tool_calls = True
         describe_inline_tools(messages, schemas)
     registered = {s['function']['name'] for s in schemas}
-    registry = getattr(mcp_client, 'registry', None)
+    registry = getattr(tools, 'registry', None)
     if not isinstance(registry, ToolRegistry):
         # Unknown external tools retain conservative execution metadata.
         registry = ToolRegistry()
@@ -193,7 +191,7 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
         checkpoint('batch', message, None, None)
         halt = None
         scheduler = ToolScheduler(registry, registered,
-            tool_executor or (lambda name, args: invoke_tool(mcp_client, name, args)),
+            tool_executor or (lambda name, args: invoke_tool(tools, name, args)),
             execution_context, emit, tool_workers, checkpoint)
         for call, args, tool_result in scheduler.run(calls):
             name = call['function']['name']
@@ -235,17 +233,6 @@ def run_agent(llm, messages, max_tokens=512, mcp_client=None, budget=None,
             halt.performance.update(metrics)
             return halt
     return finish('budget_exhausted', 'Step budget exhausted; work may be incomplete.', 'step_limit')
-
-
-def run_agent_loop(llm, messages, console, max_tokens=512, mcp_client=None, **kwargs):
-    """Compatibility text interface. New integrations should consume run_agent's result."""
-    def emit(event):
-        if event['type'] == 'tool_started':
-            console.print(f"[dim]tool: {event['name']}[/dim]")
-    result = run_agent(llm, messages, max_tokens, mcp_client, emit=emit, **kwargs)
-    if result.status != 'completed':
-        console.print(f'[{result.status}] {result.text}', markup=False)
-    return result.text
 
 
 INLINE_TOOLS_MARKER = 'Tools you can call (this model has no native tool calling):'
@@ -335,13 +322,3 @@ def _parse_inline_tool_calls(content):
             })
     return calls
 
-
-def _format_args(args):
-    """Format tool arguments for display, truncating long values."""
-    parts = []
-    for k, v in args.items():
-        s = str(v)
-        if len(s) > 60:
-            s = s[:57] + "..."
-        parts.append(f"{k}={s!r}")
-    return ", ".join(parts)

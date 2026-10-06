@@ -63,10 +63,9 @@ def mock_llm():
 
 
 @pytest.fixture
-def mock_mcp_client():
+def mock_tools():
     """Return a mock MCPClient that is connected and exposes no tools."""
     client = MagicMock()
-    client.is_connected = True
     client.get_openai_tool_schemas.return_value = [
         {"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}
         for name in ("read_file", "list_directory")
@@ -78,9 +77,3 @@ def mock_mcp_client():
         client.registry.register(ToolSpec(definition, handler=None, side_effects='none',
                                          cacheable=True, compact_observation=True))
     return client
-
-
-@pytest.fixture
-def mock_console():
-    """Return a mock Rich Console."""
-    return MagicMock()

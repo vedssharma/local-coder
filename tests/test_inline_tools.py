@@ -59,7 +59,7 @@ def test_model_without_native_tools_runs_inline_calls(tmp_path):
 
     model = Inline({'supports_tools': False})
     messages = [{'role': 'system', 'content': 'Help.'}, {'role': 'user', 'content': 'What does a.py do?'}]
-    result = run_agent(model, messages, mcp_client=WorkspaceTools(tmp_path))
+    result = run_agent(model, messages, tools=WorkspaceTools(tmp_path))
     assert result.status == 'completed' and result.text == 'It prints 1.'
     assert all('tools' not in request for request in model.requests)
     assert INLINE_TOOLS_MARKER in model.requests[0]['messages'][0]['content']

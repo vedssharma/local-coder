@@ -46,7 +46,7 @@ def test_successful_error_prefixed_text_does_not_block_agent(tmp_path):
     model.create_chat_completion.side_effect = [call, call, call,
         {'choices': [{'message': {'content': 'done'}, 'finish_reason': 'stop'}]}]
     events = []
-    assert run_agent(model, [], mcp_client=tools, emit=events.append).status == 'completed'
+    assert run_agent(model, [], tools=tools, emit=events.append).status == 'completed'
     assert all(e['result']['status'] == 'success' for e in events if e['type'] == 'tool_finished')
 
 

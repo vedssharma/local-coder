@@ -164,7 +164,6 @@ class WorkspaceTools:
         self.mode = mode
         self.processes = {}
         self._write_lock = threading.RLock()
-        self.is_connected = True
         self.registry = ToolRegistry()
         self._register_tools()
 

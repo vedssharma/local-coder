@@ -1,9 +1,8 @@
 from helpers import parse_file_references
-from agent import run_agent_loop
+from agent import RunBudget, run_agent
 from workspace_tools import WorkspaceTools, MODES
 from runtime import Runtime
-from model_backend import create_model, EmbeddedModel, import_llama
-from agent import RunBudget
+from model_backend import create_model
 import config
 import os
 import glob
@@ -29,9 +28,13 @@ def handle_model_command():
     """Handle the /model slash command: show current model and optionally switch."""
     global llm
     current_config = config.get_model_config()
-    model_path = current_config["model_path"]
-    typer.echo(f"\nCurrent model: {os.path.basename(model_path)}")
-    typer.echo(f"  Path: {model_path}")
+    model_path = current_config.get("model_path") or ""
+    if current_config.get("backend") == "openai":
+        where = current_config.get("provider") or current_config.get("base_url", "http://127.0.0.1:8080/v1")
+        typer.echo(f"\nCurrent model: {current_config.get('model', 'local-model')} via {where}")
+    else:
+        typer.echo(f"\nCurrent model: {os.path.basename(model_path)}")
+        typer.echo(f"  Path: {model_path}")
 
     # Find available .gguf files in the current directory
     gguf_files = sorted(glob.glob("./*.gguf"))
@@ -80,20 +83,20 @@ def handle_model_command():
         typer.echo(f"Error: Not a .gguf file: {new_path}\n")
         return
 
-    typer.echo(f"Loading model: {new_path}...")
     try:
+        # Check the file header instead of loading the whole model; it loads on the next request.
+        with open(new_path, 'rb') as f:
+            if f.read(4) != b'GGUF':
+                typer.echo(f"Error: Not a GGUF model file: {new_path}\n")
+                return
         import providers
         abs_path = os.path.abspath(new_path)
-        profile = providers.local_profile({**current_config, 'model_path': abs_path})
-        loaded = import_llama().Llama(model_path=abs_path, n_ctx=profile['n_ctx'], n_gpu_layers=profile['n_gpu_layers'], verbose=False)
         config.set_model_path(abs_path)
-        profile = providers.local_profile(config.get_model_config())
-        config.update_model_config(profile)
-        llm = EmbeddedModel(profile)
-        llm._model = loaded
+        config.update_model_config(providers.local_profile(config.get_model_config()))
+        llm = None
         typer.echo(f"Switched to: {os.path.basename(abs_path)}\n")
-    except Exception as e:
-        typer.echo(f"Error loading model: {e}\n")
+    except (OSError, ValueError) as e:
+        typer.echo(f"Error switching model: {e}\n")
 
 
 def _gather_project_context():
@@ -176,12 +179,10 @@ def handle_md_command(console, max_tokens):
     ]
 
     typer.echo("Generating CONTEXT.md content...\n")
-    md_content = run_agent_loop(
-        llm=get_llm(),
-        messages=generate_messages,
-        console=console,
-        max_tokens=md_max_tokens
-    )
+    result = run_agent(get_llm(), generate_messages, max_tokens=md_max_tokens)
+    if result.status != 'completed':
+        console.print(f'[{result.status}] {result.text}', markup=False)
+    md_content = result.text
 
     if not md_content or not md_content.strip():
         typer.echo("Failed to generate CONTEXT.md content.\n")
@@ -455,7 +456,7 @@ def models(
     else:
         # Show current model
         current_config = config.get_model_config()
-        model_path = current_config["model_path"]
+        model_path = current_config.get("model_path") or ""
 
         typer.echo("Current Model Configuration:")
         typer.echo(f"  Backend: {current_config['backend']}")
@@ -466,18 +467,18 @@ def models(
                 import providers
                 typer.echo(f"  Provider: {current_config['provider']} (API key: "
                            f"{'set' if providers.resolve_key(current_config) else 'missing'})")
-        typer.echo(f"  Model path: {model_path}")
+        else:
+            typer.echo(f"  Model path: {model_path}")
         typer.echo(f"  Context size: {current_config['n_ctx']}")
         typer.echo(f"  Web tools: {'on' if config.web_enabled(current_config) else 'off'}")
-        typer.echo(f"  GPU layers: {current_config['n_gpu_layers']}")
-
-        # Check if model file exists
-        if os.path.exists(model_path):
-            file_size = os.path.getsize(model_path) / (1024 * 1024 * 1024)  # Convert to GB
-            typer.echo(f"  File size: {file_size:.2f} GB")
-            typer.echo("  Status: ✓ Available")
-        else:
-            typer.echo("  Status: ✗ Not found")
+        if current_config['backend'] != 'openai':
+            typer.echo(f"  GPU layers: {current_config['n_gpu_layers']}")
+            if os.path.exists(model_path):
+                file_size = os.path.getsize(model_path) / (1024 * 1024 * 1024)  # Convert to GB
+                typer.echo(f"  File size: {file_size:.2f} GB")
+                typer.echo("  Status: ✓ Available")
+            else:
+                typer.echo("  Status: ✗ Not found")
 
 
 @app.command()
