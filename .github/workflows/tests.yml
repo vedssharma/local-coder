@@ -34,7 +34,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q --cov --cov-report=term-missing
 
       # Scripted model decisions against real files and subprocesses; no model needed.
       - name: Run scripted evaluations

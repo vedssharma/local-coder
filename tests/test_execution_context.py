@@ -62,3 +62,32 @@ def test_active_http_read_observes_deadline_and_cancellation(cancel):
         release.set()
         server.shutdown()
         server.server_close()
+
+
+def test_socket_guard_shuts_down_the_socket_when_cancelled():
+    class Socket:
+        def __init__(self, fail):
+            self.fail, self.calls = fail, 0
+
+        def shutdown(self, how):
+            self.calls += 1
+            if self.fail:
+                raise OSError('already closed')
+    for fail in (False, True):
+        cancel = threading.Event()
+        context = ExecutionContext(time.monotonic() + 30, cancel)
+        sock = Socket(fail)
+        with pytest.raises(ExecutionCancelled):
+            with context.socket_guard(sock):
+                cancel.set()
+                deadline = time.monotonic() + 2
+                while not sock.calls and time.monotonic() < deadline:
+                    time.sleep(0.01)
+        assert sock.calls == 1
+
+
+def test_socket_guard_reraises_errors_while_the_run_is_live():
+    context = ExecutionContext(time.monotonic() + 30, threading.Event())
+    with pytest.raises(OSError, match='connection reset'):
+        with context.socket_guard(None):
+            raise OSError('connection reset')

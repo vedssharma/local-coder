@@ -103,3 +103,35 @@ def test_version_one_sessions_remain_loadable(tmp_path):
     path=store.directory/(key+'.json')
     data=json.loads(path.read_text());data['version']=1;data.pop('checkpoint');path.write_text(json.dumps(data))
     assert store.load_state(key)==([{'role':'user','content':'old'}],{})
+
+
+# ---------------------------------------------------------------------------
+# recover_checkpoint validation
+# ---------------------------------------------------------------------------
+
+from checkpoint_recovery import recover_checkpoint
+
+
+def _assistant(*calls):
+    return {'role': 'assistant', 'content': None, 'tool_calls': list(calls)}
+
+
+def _tool_call(key='a', name='read'):
+    return {'id': key, 'type': 'function', 'function': {'name': name, 'arguments': '{}'}}
+
+
+@pytest.mark.parametrize('messages, checkpoint, message', [
+    ([_assistant({'id': 7, 'function': {}})], {}, 'Invalid checkpoint tool-call envelope'),
+    ([{'role': 'assistant', 'tool_calls': 'oops'}], {}, 'Invalid checkpoint tool-call envelope'),
+    ([_assistant(_tool_call())], {'calls': {'a': 'completed'}}, 'Invalid checkpoint call record'),
+    ([_assistant(_tool_call())], {'calls': {'a': {'result': ['x']}}}, 'Invalid checkpoint result'),
+])
+def test_corrupt_checkpoints_are_rejected(messages, checkpoint, message):
+    with pytest.raises(ValueError, match=message):
+        recover_checkpoint(messages, checkpoint)
+
+
+def test_existing_plain_tool_output_is_kept():
+    messages = [_assistant(_tool_call()), {'role': 'tool', 'tool_call_id': 'a', 'content': 'plain text output'}]
+    restored = recover_checkpoint(messages, {})
+    assert restored[-1] == {'role': 'tool', 'tool_call_id': 'a', 'content': 'plain text output'}

@@ -19,7 +19,7 @@ dependencies = [
 embedded = ["llama-cpp-python>=0.3.35", "numpy"]
 # The MCP server, skills/local-coder/scripts/server.py.
 mcp = ["mcp>=1.30,<2"]
-dev = ["mcp>=1.30,<2", "numpy", "pytest==9.1.1", "ruff==0.16.8"]
+dev = ["mcp>=1.30,<2", "numpy", "pytest==9.1.1", "pytest-cov==7.1.0", "ruff==0.16.8"]
 
 [project.scripts]
 local-coder = "main:app"
@@ -34,6 +34,16 @@ py-modules = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_also = ['if __name__ == .__main__.:']
+fail_under = 95
+skip_covered = true
+show_missing = true
 
 [tool.ruff]
 target-version = "py310"

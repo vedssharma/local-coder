@@ -216,3 +216,46 @@ def test_named_profile_is_a_snapshot_not_affected_by_new_global_tuning(config_di
     assert cfg.get_model_config('default')['n_threads'] == 8
     with pytest.raises(ValueError):
         cfg.save_profile('default')
+
+
+# ---------------------------------------------------------------------------
+# Atomic writes, profile names and routes
+# ---------------------------------------------------------------------------
+
+def test_atomic_write_cleans_up_after_a_failure(tmp_path, monkeypatch):
+    import os
+    target = tmp_path / 'data.json'
+    target.write_text('{"old": true}')
+    monkeypatch.setattr(os, 'replace', lambda *a: (_ for _ in ()).throw(OSError('disk full')))
+    with pytest.raises(OSError, match='disk full'):
+        cfg.write_json_atomic(target, {'new': True})
+    assert target.read_text() == '{"old": true}'
+    assert [p.name for p in tmp_path.iterdir()] == ['data.json']
+
+
+def test_atomic_write_tolerates_a_temporary_file_already_gone(tmp_path, monkeypatch):
+    import os
+
+    def vanish(temporary, path):
+        os.unlink(temporary)
+        raise OSError('lost')
+    monkeypatch.setattr(os, 'replace', vanish)
+    with pytest.raises(OSError, match='lost'):
+        cfg.write_json_atomic(tmp_path / 'data.json', {})
+
+
+def test_profile_names_and_routes_are_validated(config_dir):
+    for name in ('', 'has space', 'x' * 65, None):
+        with pytest.raises(ValueError, match='Profile names'):
+            cfg.save_profile(name)
+    with pytest.raises(ValueError, match='Unknown model profile'):
+        cfg.activate_profile('missing')
+    with pytest.raises(ValueError, match='Routes apply to'):
+        cfg.set_route('everything', 'default')
+    with pytest.raises(ValueError, match='Unknown model profile'):
+        cfg.set_route('code', 'missing')
+    cfg.save_profile('big')
+    cfg.set_route('code', 'big')
+    assert cfg.load_config()['routes'] == {'code': 'big'}
+    cfg.set_route('code', 'default')
+    assert cfg.load_config()['routes'] == {}

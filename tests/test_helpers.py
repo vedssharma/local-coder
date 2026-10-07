@@ -80,3 +80,16 @@ class TestParseFileReferences:
         _, files = helpers.parse_file_references(prompt)
         # "@" followed by a space produces no filename
         assert files == {}
+
+
+def test_missing_directories_and_unreadable_references_are_skipped(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / 'folder').mkdir()
+    (tmp_path / 'big.txt').write_text('x' * 9000)
+    (tmp_path / 'binary.bin').write_bytes(b'\xff\xfe\x00')
+    _, files = helpers.parse_file_references('see @missing.txt @folder @big.txt @binary.bin', root=tmp_path)
+    err = capsys.readouterr().err
+    assert 'File not found: missing.txt' in err and 'Not a file: folder' in err
+    assert 'Could not read binary.bin' in err
+    assert list(files) == ['big.txt']
+    assert files['big.txt'].endswith('[preloaded file truncated; use ranged read]')

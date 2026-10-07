@@ -51,3 +51,10 @@ def test_successful_error_prefixed_text_does_not_block_agent(tmp_path):
 
 
 
+
+
+def test_process_results_map_each_state():
+    assert ToolResult.process({'running': True}).status == 'running'
+    assert ToolResult.process({'timed_out': True, 'exit_code': None}).error_code == 'process_timeout'
+    assert ToolResult.process({'cancelled': True, 'exit_code': -9}).status == 'cancelled'
+    assert ToolResult.process({'exit_code': 0}).status == 'success'

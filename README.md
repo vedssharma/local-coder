@@ -154,7 +154,7 @@ python -m pytest -q
 ruff check .
 ```
 
-CI runs both on Python 3.10, 3.11 and 3.12, plus every scripted evaluation (`--scripted --suite all`).
+Add `--cov` to the pytest command to measure line coverage; it fails below 95%. CI runs the tests with coverage and the linter on Python 3.10, 3.11 and 3.12, plus every scripted evaluation (`--scripted --suite all`).
 
 Six disposable-repository evaluations cover navigation, a bug fix, a multi-file change, recovery from a failing check, permissions, and continuing an unfinished task after restart:
 

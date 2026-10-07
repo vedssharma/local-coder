@@ -368,3 +368,92 @@ def test_duplicate_reads_execute_once_per_batch_and_keep_protocol(mock_llm, mock
     mock_tools.call_tool.assert_called_once()
     outputs = [m for m in messages if m['role'] == 'tool']
     assert len(outputs) == 2 and 'Unchanged observation' in outputs[1]['content']
+
+
+# ---------------------------------------------------------------------------
+# Protocol validation and stop conditions
+# ---------------------------------------------------------------------------
+
+from execution_context import DeadlineExceeded, ExecutionCancelled
+
+
+def _reply(message, finish_reason='stop', usage=None):
+    return {'choices': [{'message': message, 'finish_reason': finish_reason}], **({'usage': usage} if usage else {})}
+
+
+def _run_once(message, finish_reason='tool_calls', **kwargs):
+    llm = MagicMock()
+    llm.create_chat_completion.return_value = _reply(message, finish_reason)
+    return agent.run_agent(llm, [{'role': 'user', 'content': 'go'}], **kwargs)
+
+
+@pytest.mark.parametrize('message, text', [
+    ('not a dict', 'Model request failed: Model returned an invalid message'),
+    ({'content': ['parts']}, 'Model request failed: Model returned invalid text content'),
+])
+def test_malformed_model_messages_block_the_run(message, text):
+    result = _run_once(message, 'stop')
+    assert (result.status, result.reason, result.text) == ('blocked', 'model_error', text)
+
+
+@pytest.mark.parametrize('error, status, reason', [
+    (KeyboardInterrupt, 'cancelled', ''),
+    (ExecutionCancelled('stop'), 'cancelled', ''),
+    (DeadlineExceeded('late'), 'budget_exhausted', 'deadline'),
+])
+def test_interrupted_model_requests_end_the_run(error, status, reason):
+    llm = MagicMock()
+    llm.create_chat_completion.side_effect = error
+    result = agent.run_agent(llm, [{'role': 'user', 'content': 'go'}])
+    assert (result.status, result.reason) == (status, reason)
+
+
+@pytest.mark.parametrize('calls, text', [
+    ('not a list', 'Model returned invalid tool calls.'),
+    (['not a dict'], 'Model returned invalid tool calls.'),
+    ([{'id': 'a', 'function': {'name': 7}}], 'Model returned an invalid tool name.'),
+    ([{'id': 7, 'function': {'name': 'read'}}], 'Model returned an invalid tool call ID.'),
+    ([{'id': 'a', 'function': {'name': 'read'}}, {'id': 'a', 'function': {'name': 'read'}}],
+     'Model returned duplicate tool call IDs.'),
+])
+def test_invalid_tool_call_envelopes_are_rejected(mock_tools, calls, text):
+    result = _run_once({'content': None, 'tool_calls': calls}, tools=mock_tools)
+    assert (result.status, result.reason, result.text) == ('blocked', 'invalid_protocol', text)
+    mock_tools.call_tool.assert_not_called()
+
+
+def test_time_budget_is_checked_before_each_model_call():
+    llm = MagicMock()
+    result = agent.run_agent(llm, [], budget=agent.RunBudget(max_steps=3, max_seconds=1e-9))
+    assert result.status == 'budget_exhausted' and result.steps == 0
+    llm.create_chat_completion.assert_not_called()
+
+
+def test_cancellation_during_a_model_call_is_honored_before_tools_run(mock_tools):
+    import threading
+    cancel = threading.Event()
+    llm = MagicMock()
+
+    def respond(**kwargs):
+        cancel.set()
+        return _reply({'content': None, 'tool_calls': [{'id': 'a', 'function': {'name': 'read_file', 'arguments': '{}'}}]},
+                      'tool_calls')
+    llm.create_chat_completion.side_effect = respond
+    result = agent.run_agent(llm, [], tools=mock_tools, cancel_event=cancel)
+    assert result.status == 'cancelled'
+    mock_tools.call_tool.assert_not_called()
+
+
+def test_step_budget_ends_a_run_that_keeps_calling_tools(mock_tools):
+    llm = MagicMock()
+    llm.create_chat_completion.side_effect = lambda **kwargs: _reply({'content': None, 'tool_calls': [
+        {'id': f'c{len(kwargs["messages"])}', 'function': {'name': 'read_file',
+                                                          'arguments': json.dumps({'n': len(kwargs['messages'])})}}]},
+        'tool_calls')
+    result = agent.run_agent(llm, [], tools=mock_tools, budget=agent.RunBudget(max_steps=2))
+    assert (result.status, result.reason, result.steps) == ('budget_exhausted', 'step_limit', 2)
+
+
+def test_unparseable_arguments_are_passed_through():
+    assert agent._arguments({'function': {'arguments': '{not json'}}) == '{not json'
+    assert agent._arguments({'function': {'arguments': {'a': 1}}}) == {'a': 1}

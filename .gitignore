@@ -47,3 +47,9 @@ llm/
 /CONTEXT.md
 # Local harness artifacts
 .local-coder/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.json
