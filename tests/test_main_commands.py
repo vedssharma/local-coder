@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,11 @@ import main
 from main import app
 
 runner = CliRunner()
+
+
+def _plain(output):
+    """Usage errors as plain text: Rich colors and boxes them when it detects CI."""
+    return ' '.join(re.sub(r'[│╭╮╰╯─]', ' ', re.sub(r'\x1b\[[0-9;]*m', '', output)).split())
 
 
 def _model(*texts, finish_reason='stop', usage=None):
@@ -320,21 +326,21 @@ def test_model_command_reports_errors_while_switching(workspace, tmp_path, monke
 
 def test_models_rejects_unknown_providers_and_stray_api_key_flag(workspace):
     result = runner.invoke(app, ['models', '--provider', 'nobody'])
-    assert result.exit_code != 0 and 'Unknown provider' in result.output
+    assert result.exit_code != 0 and 'Unknown provider' in _plain(result.output)
     result = runner.invoke(app, ['models', '--api-key'])
-    assert result.exit_code != 0 and '--api-key requires --provider' in result.output
+    assert result.exit_code != 0 and '--api-key requires --provider' in _plain(result.output)
 
 
 def test_models_requires_an_api_key_for_a_new_provider(workspace, monkeypatch):
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     result = runner.invoke(app, ['models', '--provider', 'openai'], input='\n')
-    assert result.exit_code != 0 and 'An API key is required' in result.output
+    assert result.exit_code != 0 and 'An API key is required' in _plain(result.output)
 
 
 def test_models_rejects_invalid_profiles_without_saving(workspace):
     before = config.get_model_config()
     result = runner.invoke(app, ['models', '--speculative-mode', 'sometimes'])
-    assert result.exit_code != 0 and 'speculative_mode' in result.output
+    assert result.exit_code != 0 and 'speculative_mode' in _plain(result.output)
     assert config.get_model_config() == before
 
 
@@ -469,9 +475,9 @@ def test_profiles_list_and_errors(workspace):
     listing = json.loads(result.output)
     assert listing['profiles'] == ['fast'] and listing['active'] == 'default'
     result = runner.invoke(app, ['profiles', 'delete', 'fast'])
-    assert result.exit_code != 0 and 'Use list, save NAME' in result.output
+    assert result.exit_code != 0 and 'Use list, save NAME' in _plain(result.output)
     result = runner.invoke(app, ['profiles', 'use', 'missing'])
-    assert result.exit_code != 0 and 'Unknown model profile' in result.output
+    assert result.exit_code != 0 and 'Unknown model profile' in _plain(result.output)
 
 
 # ---------------------------------------------------------------------------
@@ -489,13 +495,13 @@ def test_inference_server_stop_without_a_daemon(workspace):
     with patch('inference_daemon.PersistentModel') as persistent:
         persistent.return_value.stop.side_effect = ConnectionRefusedError('nobody home')
         result = runner.invoke(app, ['inference-server', '--stop'])
-    assert result.exit_code != 0 and 'Daemon unavailable' in result.output
+    assert result.exit_code != 0 and 'Daemon unavailable' in _plain(result.output)
 
 
 def test_inference_server_rejects_server_backends(workspace):
     runner.invoke(app, ['models', '--backend', 'openai', '--base-url', 'http://127.0.0.1:8080/v1'])
     result = runner.invoke(app, ['inference-server'])
-    assert result.exit_code != 0 and 'for embedded models' in result.output
+    assert result.exit_code != 0 and 'for embedded models' in _plain(result.output)
 
 
 def test_inference_server_serves_until_interrupted(workspace):
