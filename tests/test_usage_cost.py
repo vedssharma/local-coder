@@ -63,3 +63,35 @@ def test_turn_prints_usage_for_hosted_profiles(capsys):
         'usage_reports': 1, 'model_calls': 1, 'prompt_tokens': 1000, 'cached_prompt_tokens': 0, 'completion_tokens': 500})
     execute_turn(runtime, 'hi', 64)
     assert 'Usage: 1,000 input tokens, 500 output tokens; estimated $0.0020' in capsys.readouterr().out
+
+
+def test_saved_keys_must_name_a_provider_and_be_nonempty(config_dir):
+    import pytest
+    with pytest.raises(ValueError, match='Unknown provider'):
+        providers.save_key('nobody', 'k')
+    with pytest.raises(ValueError, match='API key is empty'):
+        providers.save_key('openai', '   ')
+
+
+def _select(answers, secret='', said=None):
+    answers = iter(answers)
+    return providers.select_provider_interactively(ask=lambda _: next(answers), say=(said if said is not None else []).append,
+                                                   ask_secret=lambda _: secret)
+
+
+def test_interactive_provider_selection_can_be_cancelled(config_dir, monkeypatch):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    assert _select(['']) is None
+    assert _select(['99']) is None
+    assert _select(['1', '']) is None
+    said = []
+    assert _select(['1', '1'], said=said) is None
+    assert 'No API key provided; cancelled.' in said
+
+
+def test_interactive_selection_keeps_an_existing_key_and_custom_model(config_dir, monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'from-env')
+    said = []
+    profile = _select(['1', 'my-custom-model'], said=said)
+    assert profile['provider'] == 'openai' and profile['model'] == 'my-custom-model'
+    assert any('Using existing' in line for line in said)

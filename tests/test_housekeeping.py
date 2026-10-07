@@ -97,3 +97,61 @@ def test_clean_command(tmp_path, monkeypatch, config_dir):
     assert 'Would remove 1 file' in result.output and record.exists()
     assert 'Removed 1 file' in runner.invoke(app, ['clean', '--older-than', '1']).output
     assert not record.exists()
+
+
+def test_retention_values_must_be_nonnegative_numbers():
+    for value in (-1, '30', True):
+        with pytest.raises(ValueError, match='nonnegative number of days'):
+            housekeeping.retention_days({'undo': value})
+
+
+def test_a_symlinked_harness_directory_is_refused(tmp_path):
+    (tmp_path / 'elsewhere').mkdir()
+    (tmp_path / '.local-coder').symlink_to(tmp_path / 'elsewhere')
+    with pytest.raises(ValueError, match='cannot be a symlink'):
+        housekeeping.prune(tmp_path, SessionStore(tmp_path / 'sessions', tmp_path))
+
+
+def test_unreadable_and_locked_sessions_are_kept(tmp_path):
+    import fcntl
+    store = SessionStore(tmp_path / 'sessions', tmp_path)
+    corrupt, locked = store.save([]), store.save([])
+    (store.directory / (corrupt + '.json')).write_text('{broken')
+    for key in (corrupt, locked):
+        _age(store.directory / (key + '.json'), 200)
+    lock = store.directory / (locked + '.lock')
+    lock.touch()
+    fd = os.open(lock, os.O_WRONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        removed = housekeeping.prune(tmp_path, store)
+    finally:
+        os.close(fd)
+    assert removed['sessions'] == (0, 0)
+    assert sorted(store.list()) == sorted([corrupt, locked])
+
+
+def test_a_lock_that_cannot_be_opened_keeps_its_session(tmp_path):
+    store = SessionStore(tmp_path / 'sessions', tmp_path)
+    key = store.save([])
+    _age(store.directory / (key + '.json'), 200)
+    (tmp_path / 'target').touch()
+    (store.directory / (key + '.lock')).symlink_to(tmp_path / 'target')  # O_NOFOLLOW refuses it.
+    assert housekeeping.prune(tmp_path, store)['sessions'] == (0, 0)
+
+
+def test_unlocked_old_sessions_are_removed_with_their_lock(tmp_path):
+    store = SessionStore(tmp_path / 'sessions', tmp_path)
+    key = store.save([])
+    with store.lease(key):
+        pass
+    _age(store.directory / (key + '.json'), 200)
+    assert housekeeping.prune(tmp_path, store)['sessions'][0] == 1
+    assert not (store.directory / (key + '.lock')).exists()
+
+
+def test_files_that_vanish_during_pruning_are_skipped(tmp_path):
+    from pathlib import Path
+    tally = [0, 0]
+    housekeeping._remove_if_old(Path(tmp_path / 'gone.json'), time.time(), False, tally)
+    assert tally == [0, 0]

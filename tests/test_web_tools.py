@@ -159,3 +159,49 @@ def test_runtime_executes_web_tool_and_retains_source(tmp_path, monkeypatch):
         assert result.status == 'completed'
         observation = next(m for m in runtime.messages if m['role'] == 'tool')
         assert 'API docs' in observation['content'] and 'https://example.com/docs' in observation['content']
+
+
+def test_local_hostnames_are_rejected():
+    for url in ('http://localhost/', 'https://printer.local/', 'https://app.localhost./'):
+        with pytest.raises(ValueError, match='non-public'):
+            web_tools.public_url(url)
+
+
+def test_fetch_validates_max_chars():
+    with pytest.raises(ValueError, match='max_chars'):
+        web_tools.fetch('https://example.com', max_chars=99)
+
+
+def test_unknown_charsets_fall_back_to_utf8(monkeypatch, public_dns):
+    page = response('café'.encode(), 'text/plain')
+    page.headers.replace_header('Content-Type', 'text/plain; charset=made-up-charset')
+    opener = MagicMock()
+    opener.open.return_value = page
+    monkeypatch.setattr(web_tools, 'build_opener', lambda *a: opener)
+    assert web_tools.fetch('https://example.com')['text'] == 'café'
+
+
+@pytest.mark.parametrize('reason, retryable', [('Connection refused', True), ('Tunnel connection failed: 403', False)])
+def test_network_failures_are_reported(monkeypatch, public_dns, reason, retryable):
+    from urllib.error import URLError
+    opener = MagicMock()
+    opener.open.side_effect = URLError(reason)
+    monkeypatch.setattr(web_tools, 'build_opener', lambda *a: opener)
+    with pytest.raises(web_tools.WebRequestError) as raised:
+        web_tools.fetch('https://example.com')
+    assert raised.value.code == 'network_error' and raised.value.retryable is retryable
+    assert reason in str(raised.value)
+
+
+def test_requests_check_the_execution_context(monkeypatch, public_dns):
+    import threading
+    import time
+    from execution_context import CURRENT_CONTEXT, ExecutionCancelled, ExecutionContext
+    cancelled = threading.Event()
+    cancelled.set()
+    token = CURRENT_CONTEXT.set(ExecutionContext(time.monotonic() + 30, cancelled))
+    try:
+        with pytest.raises(ExecutionCancelled):
+            web_tools.fetch('https://example.com')
+    finally:
+        CURRENT_CONTEXT.reset(token)

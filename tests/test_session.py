@@ -97,3 +97,116 @@ def test_cached_and_uncached_context_budgets_agree():
     for index in range(20):
         messages.append({'role': 'assistant', 'content': str(index)})
         assert cached.size(messages, []) == uncached.size(messages, [])
+
+
+# ---------------------------------------------------------------------------
+# Storage validation and compaction edge cases
+# ---------------------------------------------------------------------------
+
+import json
+
+
+def test_saving_without_a_checkpoint_keeps_the_stored_one(tmp_path):
+    store = SessionStore(tmp_path / 'sessions', tmp_path)
+    key = store.save([], checkpoint={'calls': {'a': {'state': 'completed'}}})
+    store.save([{'role': 'user', 'content': 'next'}], key)
+    assert store.load_state(key) == ([{'role': 'user', 'content': 'next'}], {'calls': {'a': {'state': 'completed'}}})
+
+
+@pytest.mark.parametrize('data, message', [
+    ({'messages': [{'role': 'wizard'}]}, 'Invalid session transcript'),
+    ({'messages': 'not a list'}, 'Invalid session transcript'),
+    ({'messages': [], 'checkpoint': {'calls': []}}, 'Invalid session checkpoint'),
+    ({'messages': [], 'checkpoint': []}, 'Invalid session checkpoint'),
+])
+def test_corrupt_sessions_are_rejected(tmp_path, data, message):
+    store = SessionStore(tmp_path / 'sessions', tmp_path)
+    key = store.save([])
+    path = tmp_path / 'sessions' / (key + '.json')
+    path.write_text(json.dumps({'version': 2, 'workspace': store.workspace, **data}))
+    with pytest.raises(ValueError, match=message):
+        store.load_state(key)
+
+
+def test_summaries_skip_unreadable_sessions(tmp_path):
+    store = SessionStore(tmp_path / 'sessions', tmp_path)
+    good = store.save([{'role': 'user', 'content': 'hello'}])
+    (tmp_path / 'sessions' / ('a' * 32 + '.json')).write_text('{broken')
+    assert [s['id'] for s in store.summaries()] == [good]
+
+
+def test_context_manager_validates_its_token_counter():
+    with pytest.raises(ValueError, match='cache_entries'):
+        ContextManager(cache_entries=-1)
+    context = ContextManager()
+    with pytest.raises(ValueError, match='must be callable'):
+        context.count_tokens = 42
+    context.count_tokens = lambda text: -1
+    with pytest.raises(ValueError, match='invalid count'):
+        context.count_tokens('text')
+
+
+def test_digest_keeps_the_tail_of_a_single_oversized_note():
+    context = ContextManager(1000)
+    context.memory = ['x' * 5000 + 'END']
+    digest = context._digest()
+    assert len(digest) == context.summary_chars and digest.endswith('END')
+
+
+def test_summaries_describe_tool_calls_and_observations():
+    notes = ContextManager._summarize([
+        {'role': 'assistant', 'tool_calls': [{'id': 'c', 'function': {'name': 'read', 'arguments': '{}'}}]},
+        {'role': 'tool', 'tool_call_id': 'c', 'content': 'file body'}])
+    assert notes == ['Tool: {"name": "read", "arguments": "{}"}', 'Observation: file body']
+
+
+def test_compaction_without_a_user_request_does_nothing():
+    assert ContextManager()._compact_active([{'role': 'system', 'content': 'rules'}]) is False
+
+
+def _call(key, name='read'):
+    return {'role': 'assistant', 'content': None,
+            'tool_calls': [{'id': key, 'type': 'function', 'function': {'name': name, 'arguments': '{}'}}]}
+
+
+def test_newest_exchange_skips_non_envelope_tool_output():
+    messages = [{'role': 'user', 'content': 'task'}, _call('a'),
+                {'role': 'tool', 'tool_call_id': 'a', 'content': 'plain ' * 400}]
+    assert ContextManager()._compact_active(messages) is False
+    messages[-1]['content'] = json.dumps(['a', 'list'])
+    assert ContextManager()._compact_active(messages) is False
+
+
+def test_older_exchanges_with_plain_outputs_are_summarized(tmp_path):
+    context = ContextManager(artifact_dir=tmp_path / 'artifacts')
+    messages = [{'role': 'user', 'content': 'task'},
+                _call('a'), {'role': 'tool', 'tool_call_id': 'a', 'content': 'not json'},
+                _call('b'), {'role': 'tool', 'tool_call_id': 'b', 'content': '[1, 2]'},
+                _call('c'), {'role': 'tool', 'tool_call_id': 'c', 'content': '{"status": "success", "data": "ok"}'}]
+    assert context._compact_active(messages) is True
+    outcomes = context.active_notes[0]['outcomes']
+    assert outcomes[0]['data'] == 'not json' and outcomes[0]['status'] is None
+    assert context.active_notes[0]['artifact']
+    assert context._compact_active(messages) is True
+    assert context.active_notes[1]['outcomes'][0]['data'] == '[1, 2]'
+
+
+@pytest.mark.parametrize('stored, restored', [
+    ('Compacted tool evidence:\n[{"calls": [{"id": "z", "name": "read", "arguments": ""}], "outcomes": []}]', 1),
+    ('Compacted tool evidence:\nnot json', 0),
+    ('no newline at all', 0),
+])
+def test_resumed_tool_memory_is_restored_when_readable(stored, restored):
+    context = ContextManager()
+    messages = [{'role': 'user', 'content': 'task'},
+                {'role': 'user', 'name': 'active_tool_memory', 'content': stored},
+                _call('a'), {'role': 'tool', 'tool_call_id': 'a', 'content': '{}'},
+                _call('b'), {'role': 'tool', 'tool_call_id': 'b', 'content': '{}'}]
+    assert context._compact_active(messages) is True
+    assert len(context.active_notes) == restored + 1
+
+
+def test_instructions_target_must_be_inside_the_workspace(tmp_path):
+    (tmp_path / 'work').mkdir()
+    with pytest.raises(ValueError, match='outside workspace'):
+        repository_instructions(tmp_path / 'work', tmp_path)
